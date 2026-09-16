@@ -3,6 +3,7 @@
 //! Bytes in, cells out. No windows, fonts, GPUs or processes live here.
 
 pub mod cell;
+pub mod color;
 
 #[cfg(test)]
 mod smoke {
