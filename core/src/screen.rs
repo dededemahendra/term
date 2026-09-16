@@ -3,9 +3,10 @@
 //! it directly.
 
 use unicode_width::UnicodeWidthChar;
-use vte::{Params, Perform};
+use vte::{Params, ParamsIter, Perform};
 
 use crate::cell::{flags, Cell, DEFAULT_COLOR};
+use crate::color::{ColorTable, Rgb};
 use crate::grid::Grid;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,6 +85,17 @@ fn param0(params: &Params, index: usize) -> u16 {
     params.iter().nth(index).and_then(|p| p.first().copied()).unwrap_or(0)
 }
 
+/// Argument `index` of an extended colour spec. Colon form carries the
+/// arguments as subparameters of `p`; semicolon form spreads them over
+/// the following parameters in `it`.
+fn ext_arg(p: &[u16], it: &mut ParamsIter<'_>, index: usize) -> Option<u16> {
+    if p.len() > 1 {
+        p.get(index).copied()
+    } else {
+        it.next().map(|next| next[0])
+    }
+}
+
 pub struct Screen {
     primary: Grid,
     alt: Grid,
@@ -96,6 +108,7 @@ pub struct Screen {
     modes: Modes,
     responses: Vec<u8>,
     last_char: Option<char>,
+    colors: ColorTable,
 }
 
 impl Screen {
@@ -113,6 +126,7 @@ impl Screen {
             modes: Modes::default(),
             responses: Vec::new(),
             last_char: None,
+            colors: ColorTable::new(),
         }
     }
 
@@ -520,6 +534,77 @@ impl Screen {
         self.modes.cursor_shape = shape;
         self.modes.cursor_blink = blink;
     }
+
+    pub fn colors(&self) -> &ColorTable {
+        &self.colors
+    }
+
+    fn add_flag(&mut self, flag: u8) {
+        self.template = self.template.with_flags(self.template.flags() | flag);
+    }
+
+    fn remove_flag(&mut self, flag: u8) {
+        self.template = self.template.with_flags(self.template.flags() & !flag);
+    }
+
+    /// Resolves a 38 or 48 colour spec. Returns a palette index for
+    /// `;5;n`, an interned index for `;2;r;g;b`, `None` when malformed.
+    fn extended_color(&mut self, p: &[u16], it: &mut ParamsIter<'_>) -> Option<u16> {
+        match ext_arg(p, it, 1)? {
+            5 => Some(ext_arg(p, it, 2)?.min(255)),
+            2 => {
+                let (r, g, b) = if p.len() > 1 {
+                    match p.len() {
+                        5 => (p[2], p[3], p[4]),
+                        6.. => (p[3], p[4], p[5]),
+                        _ => return None,
+                    }
+                } else {
+                    (it.next()?[0], it.next()?[0], it.next()?[0])
+                };
+                let rgb = Rgb { r: r.min(255) as u8, g: g.min(255) as u8, b: b.min(255) as u8 };
+                self.colors.intern(rgb)
+            }
+            _ => None,
+        }
+    }
+
+    fn sgr(&mut self, params: &Params) {
+        let mut it = params.iter();
+        while let Some(p) = it.next() {
+            match p[0] {
+                0 => self.template = Cell::default(),
+                1 => self.add_flag(flags::BOLD),
+                2 => self.add_flag(flags::DIM),
+                3 => self.add_flag(flags::ITALIC),
+                4 => self.add_flag(flags::UNDERLINE),
+                7 => self.add_flag(flags::INVERSE),
+                9 => self.add_flag(flags::STRIKE),
+                22 => self.remove_flag(flags::BOLD | flags::DIM),
+                23 => self.remove_flag(flags::ITALIC),
+                24 => self.remove_flag(flags::UNDERLINE),
+                27 => self.remove_flag(flags::INVERSE),
+                29 => self.remove_flag(flags::STRIKE),
+                30..=37 => self.template = self.template.with_fg(p[0] - 30),
+                38 => {
+                    if let Some(index) = self.extended_color(p, &mut it) {
+                        self.template = self.template.with_fg(index);
+                    }
+                }
+                39 => self.template = self.template.with_fg(DEFAULT_COLOR),
+                40..=47 => self.template = self.template.with_bg(p[0] - 40),
+                48 => {
+                    if let Some(index) = self.extended_color(p, &mut it) {
+                        self.template = self.template.with_bg(index);
+                    }
+                }
+                49 => self.template = self.template.with_bg(DEFAULT_COLOR),
+                90..=97 => self.template = self.template.with_fg(p[0] - 90 + 8),
+                100..=107 => self.template = self.template.with_bg(p[0] - 100 + 8),
+                _ => {}
+            }
+        }
+    }
 }
 
 impl Perform for Screen {
@@ -613,6 +698,7 @@ impl Perform for Screen {
             (b"", 'c') => self.report("\x1b[?1;2c"),
             (b">", 'c') => self.report("\x1b[>0;0;0c"),
             (b" ", 'q') => self.set_cursor_style(param0(params, 0)),
+            (b"", 'm') => self.sgr(params),
             _ => {}
         }
     }
@@ -622,6 +708,7 @@ impl Perform for Screen {
 mod tests {
     use super::*;
     use crate::cell::flags;
+    use crate::color::Rgb;
 
     fn feed(s: &mut Screen, bytes: &[u8]) {
         let mut parser = vte::Parser::new();
@@ -929,5 +1016,98 @@ mod tests {
         assert_eq!(s.cursor().row, 2);
         let rows: Vec<String> = (0..4).map(|r| s.row_text(r)).collect();
         assert_eq!(rows, ["a", "b", "c", ""]);
+    }
+
+    #[test]
+    fn sgr_bold_red() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[1;31mX");
+        let c = s.grid().cell(0, 0);
+        assert_eq!(c.flags(), flags::BOLD);
+        assert_eq!(c.fg(), 1);
+        assert_eq!(c.bg(), crate::cell::DEFAULT_COLOR);
+    }
+
+    #[test]
+    fn sgr_reset_with_zero_and_with_no_parameter() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[1mX\x1b[0mY\x1b[4mZ\x1b[mW");
+        assert_eq!(s.grid().cell(0, 0).flags(), flags::BOLD);
+        assert_eq!(s.grid().cell(1, 0).flags(), 0);
+        assert_eq!(s.grid().cell(2, 0).flags(), flags::UNDERLINE);
+        assert_eq!(s.grid().cell(3, 0).flags(), 0);
+    }
+
+    #[test]
+    fn sgr_truecolor_semicolon_form() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[38;2;10;20;30mX");
+        let fg = s.grid().cell(0, 0).fg();
+        assert!(fg >= 256);
+        assert_eq!(s.colors().get(fg), Some(Rgb { r: 10, g: 20, b: 30 }));
+    }
+
+    #[test]
+    fn sgr_truecolor_colon_forms() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[38:2::1:2:3mA\x1b[48:2:4:5:6mB");
+        let a = s.grid().cell(0, 0);
+        let b = s.grid().cell(1, 0);
+        assert_eq!(s.colors().get(a.fg()), Some(Rgb { r: 1, g: 2, b: 3 }));
+        assert_eq!(s.colors().get(b.bg()), Some(Rgb { r: 4, g: 5, b: 6 }));
+        assert_eq!(a.fg(), b.fg());
+    }
+
+    #[test]
+    fn sgr_indexed_256() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[38;5;200mX\x1b[48:5:100mY");
+        assert_eq!(s.grid().cell(0, 0).fg(), 200);
+        assert_eq!(s.grid().cell(1, 0).bg(), 100);
+    }
+
+    #[test]
+    fn sgr_bright_and_default_colours() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[92;103mX\x1b[39;49mY");
+        let x = s.grid().cell(0, 0);
+        let y = s.grid().cell(1, 0);
+        assert_eq!((x.fg(), x.bg()), (10, 11));
+        assert_eq!((y.fg(), y.bg()), (crate::cell::DEFAULT_COLOR, crate::cell::DEFAULT_COLOR));
+    }
+
+    #[test]
+    fn sgr_clears_individual_attributes() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[1;2;3;4;7;9mA\x1b[22;23;24;27;29mB");
+        let all = flags::BOLD | flags::DIM | flags::ITALIC | flags::UNDERLINE | flags::INVERSE | flags::STRIKE;
+        assert_eq!(s.grid().cell(0, 0).flags(), all);
+        assert_eq!(s.grid().cell(1, 0).flags(), 0);
+    }
+
+    #[test]
+    fn sgr_does_not_touch_existing_cells() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"A\x1b[1mB");
+        assert_eq!(s.grid().cell(0, 0).flags(), 0);
+        assert_eq!(s.grid().cell(1, 0).flags(), flags::BOLD);
+    }
+
+    #[test]
+    fn erase_uses_current_background_only() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[1;31;44m\x1b[2K");
+        let c = s.grid().cell(5, 0);
+        assert_eq!(c.bg(), 4);
+        assert_eq!(c.fg(), crate::cell::DEFAULT_COLOR);
+        assert_eq!(c.flags(), 0);
+    }
+
+    #[test]
+    fn sgr_truncated_extended_colour_is_ignored() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[38;2;1mX\x1b[38;5mY");
+        assert_eq!(s.grid().cell(0, 0).fg(), crate::cell::DEFAULT_COLOR);
+        assert_eq!(s.grid().cell(1, 0).fg(), crate::cell::DEFAULT_COLOR);
     }
 }
