@@ -121,6 +121,8 @@ pub struct Screen {
     saved_alt: Option<SavedCursor>,
     title: String,
     pending_zwj: bool,
+    /// True when the cell before the cursor was written by the last print.
+    just_printed: bool,
 }
 
 impl Screen {
@@ -143,6 +145,7 @@ impl Screen {
             saved_alt: None,
             title: String::new(),
             pending_zwj: false,
+            just_printed: false,
         }
     }
 
@@ -303,13 +306,14 @@ impl Screen {
             self.cursor.pending_wrap = false;
         }
         self.last_char = Some(c);
+        self.just_printed = true;
     }
 
     /// VS16 after a narrow glyph: make it wide if the next column is free.
     fn emoji_presentation(&mut self) {
         let cols = self.cols();
         let row = self.cursor.row;
-        if self.cursor.pending_wrap || self.cursor.col == 0 {
+        if !self.just_printed || self.cursor.pending_wrap || self.cursor.col == 0 {
             return;
         }
         let col = self.cursor.col - 1;
@@ -368,6 +372,7 @@ impl Screen {
         self.cursor.row = self.cursor.row.min(rows - 1);
         self.cursor.col = self.cursor.col.min(cols - 1);
         self.cursor.pending_wrap = false;
+        self.just_printed = false;
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         self.tabs = default_tabs(cols);
@@ -799,6 +804,7 @@ impl Perform for Screen {
 
     fn execute(&mut self, byte: u8) {
         self.pending_zwj = false;
+        self.just_printed = false;
         match byte {
             0x08 => self.backspace(),
             0x09 => self.tab_forward(),
@@ -809,6 +815,7 @@ impl Perform for Screen {
     }
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        self.just_printed = false;
         if ignore {
             return;
         }
@@ -890,6 +897,7 @@ impl Perform for Screen {
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.just_printed = false;
         match (intermediates, byte) {
             (b"", b'7') => self.save_cursor(),
             (b"", b'8') => self.restore_cursor(),
@@ -1557,6 +1565,19 @@ mod tests {
         feed(&mut s, "\u{2603}\u{FE0E}x".as_bytes());
         assert_eq!(s.row_text(0), "\u{2603}x");
         assert!(!s.grid().cell(0, 0).has(flags::WIDE));
+    }
+
+    #[test]
+    fn vs16_after_a_control_character_is_a_noop() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "\t\u{FE0F}x".as_bytes());
+        assert_eq!(s.row_text(0), "        x");
+        assert_eq!(s.cursor().col, 9);
+        assert!(!s.grid().cell(7, 0).has(flags::WIDE));
+        let mut s = screen(10, 1);
+        feed(&mut s, "a\x1b[3G\u{FE0F}x".as_bytes());
+        assert_eq!(s.row_text(0), "a x");
+        assert!(!s.grid().cell(1, 0).has(flags::WIDE));
     }
 
     #[test]
