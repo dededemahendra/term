@@ -135,6 +135,17 @@ mod tests {
     }
 
     #[test]
+    fn dump_ignores_the_viewport() {
+        let mut t = Term::new(5, 2, 5);
+        t.feed(b"a\r\nb\r\nc");
+        t.scroll_viewport(1);
+        assert_eq!(t.dump(), "b\nc");
+        let mut out = vec![Cell::default(); 10];
+        assert!(t.copy_visible(&mut out));
+        assert_eq!(out[0].codepoint(), 'a');
+    }
+
+    #[test]
     fn resize_clears_selection() {
         let mut t = Term::new(5, 2, 0);
         t.feed(b"abc");

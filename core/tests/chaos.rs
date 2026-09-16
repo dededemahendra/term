@@ -1,6 +1,8 @@
 //! Feeds deterministic pseudo random bytes, biased towards escape
 //! sequence syntax, through the core. Any panic is a bug in the core.
 
+use termcore::cell::Cell;
+use termcore::selection::SelectionMode;
 use termcore::term::Term;
 
 struct XorShift(u64);
@@ -45,6 +47,25 @@ fn random_bytes_never_panic() {
             let rows = 1 + (rng.next() % 100) as usize;
             term.resize(cols, rows);
         }
+        // Drive a selection through the same chaos: coordinates are
+        // sometimes out of range on purpose, which must be rejected.
+        let cols = term.screen().cols();
+        let rows = term.screen().rows();
+        let col = (rng.next() % (cols as u64 + 2)) as usize;
+        let row = (rng.next() % (rows as u64 + 2)) as usize;
+        match round % 4 {
+            0 => {
+                term.selection_start(col, row, SelectionMode::from_u8((rng.next() % 3) as u8));
+            }
+            1 | 2 => {
+                term.selection_extend(col, row);
+            }
+            _ => term.selection_clear(),
+        }
+        term.scroll_viewport((rng.next() % 7) as i32 - 3);
+        let mut cells = vec![Cell::default(); cols * rows];
+        assert!(term.copy_visible(&mut cells), "copy_visible rejected a correctly sized buffer");
+        let _ = term.selection_text();
         let screen = term.screen();
         let cursor = screen.cursor();
         assert!(
