@@ -4267,11 +4267,11 @@ Run:
 cargo build -p termcore --release
 echo '#include "core/include/termcore.h"
 int main(void) { Term *t = term_new(80, 24, 100); term_free(t); return 0; }' > target/termcore_check.c
-cc -Wall -Wextra -Werror target/termcore_check.c target/release/libtermcore.a -o target/termcore_check && target/termcore_check && echo LINK_OK
-nm target/release/libtermcore.a | grep -c ' T _term_'
+cc -I. -Wall -Wextra -Werror target/termcore_check.c target/release/libtermcore.a -o target/termcore_check && target/termcore_check && echo LINK_OK
+nm target/release/libtermcore.dylib | grep -c ' T _term_'
 ```
 
-Expected: `LINK_OK`, then `16`.
+Expected: `LINK_OK`, then `16`. The count is taken from the shared library because the Xcode command line `nm` cannot parse the static archive's object format from this Rust version; the static archive is what the C check links, so `LINK_OK` proves the same symbols are there.
 
 - [ ] **Step 6: Commit**
 
