@@ -4,6 +4,7 @@
 
 pub mod cell;
 pub mod color;
+pub mod grid;
 
 #[cfg(test)]
 mod smoke {
