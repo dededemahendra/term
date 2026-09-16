@@ -136,8 +136,11 @@ comes from the Unicode East Asian Width table via a crate, plus an emoji
 presentation table. Basic emoji sequences collapse into one cell.
 
 Allocation policy: the grid is allocated once at creation and on resize.
-Feeding bytes never allocates. Scrollback is a fixed ring; the oldest row
-is overwritten.
+Feeding bytes never allocates on the parse and grid path. The documented
+exceptions are rare and bounded: interning a newly seen 24-bit colour,
+building a DSR or DA reply, storing an OSC title, and a full reset (RIS),
+which rebuilds the screen. Scrollback is a fixed ring; the oldest row is
+overwritten.
 
 ### Screen state
 

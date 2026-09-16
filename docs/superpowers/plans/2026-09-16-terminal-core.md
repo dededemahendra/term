@@ -15,7 +15,7 @@
 - Rust toolchain pinned to `1.98.1` via `rust-toolchain.toml`. Edition `2021`.
 - Only two runtime dependencies: `vte = "0.15"` and `unicode-width = "0.2"`.
 - The core never panics on input. Any byte sequence is consumed or ignored.
-- Feeding bytes never allocates, with one documented exception: the first sighting of a new 24-bit colour interns it into the overflow table.
+- Feeding bytes never allocates on the parse and grid path. Documented exceptions: the first sighting of a new 24-bit colour interns it into the overflow table; DSR and DA reply bytes and the OSC title string may allocate; RIS (ESC c, a full reset) rebuilds the screen and may allocate. Resize is not on the feed path.
 - A cell is one packed `u64`: bits 0..21 codepoint, 21..29 flags, 29..45 fg index, 45..61 bg index, bit 61 selected, 62..64 reserved.
 - Colour index `0xFFFF` means "default colour". Indices 0..256 are the palette, 256..0xFFFF the overflow table (65,279 entries).
 - The C ABI is the only boundary. No callbacks from Rust into the shell. Every function returns a status code or a length.
