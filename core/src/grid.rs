@@ -302,6 +302,13 @@ impl Grid {
         }
         self.cols = cols;
         let want_capacity = rows + self.scrollback;
+        // Evict the oldest rows that no longer fit under the scrollback cap.
+        if self.len > want_capacity {
+            let excess = self.len - want_capacity;
+            self.storage.rotate_left(excess);
+            self.len -= excess;
+            self.dropped += excess as u64;
+        }
         while self.storage.len() < want_capacity {
             self.storage.push(Row::new(cols));
         }
@@ -309,8 +316,7 @@ impl Grid {
             self.storage[self.len].clear(template);
             self.len += 1;
         }
-        let keep = want_capacity.max(self.len);
-        self.storage.truncate(keep);
+        self.storage.truncate(want_capacity);
         self.rows = rows;
         self.viewport = self.viewport.min(self.scrollback_len());
         self.dirty = vec![u64::MAX; rows.div_ceil(64)];
@@ -535,5 +541,22 @@ mod tests {
         g.resize(1, 4, Cell::default());
         let rows: Vec<String> = (0..4).map(|r| row_text(&g, r)).collect();
         assert_eq!(rows, ["c", "d", "e", ""]);
+    }
+
+    #[test]
+    fn resize_shorter_evicts_rows_beyond_scrollback_cap() {
+        let mut g = Grid::new(1, 2, 2);
+        for i in 0..10u8 {
+            g.set_cell(0, 1, ch((b'a' + i) as char));
+            g.scroll_up_full(1, Cell::default());
+        }
+        assert_eq!(g.scrollback_len(), 2);
+        g.resize(1, 1, Cell::default());
+        assert_eq!(g.rows(), 1);
+        assert_eq!(g.scrollback_len(), 2);
+        assert!(g.scrollback_len() <= g.scrollback_capacity());
+        assert_eq!(g.line_count(), 3);
+        assert_eq!(row_text(&g, 0), "");
+        assert_eq!(g.line(g.first_line_id()).unwrap().cells()[0].codepoint(), 'i');
     }
 }
