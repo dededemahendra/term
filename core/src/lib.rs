@@ -8,6 +8,7 @@ pub mod grid;
 pub mod screen;
 pub mod selection;
 pub mod term;
+pub mod ffi;
 
 #[cfg(test)]
 mod smoke {
