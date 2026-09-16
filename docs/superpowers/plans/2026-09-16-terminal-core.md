@@ -719,7 +719,7 @@ Replace `core/src/grid.rs` with the full file (tests block at the bottom):
 
 use crate::cell::Cell;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     cells: Vec<Cell>,
     /// True when the row overflowed into the next one (soft wrap).
