@@ -1,0 +1,14 @@
+[package]
+name = "termcore"
+version = "0.1.0"
+edition = "2021"
+description = "Portable terminal emulator core: parser, grid, screen state, C ABI"
+license = "MIT"
+
+[lib]
+name = "termcore"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+vte = "0.15"
+unicode-width = "0.2"

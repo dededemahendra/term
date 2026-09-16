@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+exclude = ["core/fuzz"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
