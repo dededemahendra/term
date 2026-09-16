@@ -19,10 +19,19 @@ impl Term {
         }
     }
 
-    /// Parses `bytes` into the screen. Never panics, never allocates
-    /// except when a new 24-bit colour is first seen.
+    /// Parses `bytes` into the screen. Never panics. Allocates only in
+    /// the documented cases: a newly seen 24-bit colour, a DSR or DA
+    /// reply, an OSC title, or a full reset.
+    ///
+    /// A selection is in line ids of one screen, so it is dropped when
+    /// the active screen changes or the screen is reset.
     pub fn feed(&mut self, bytes: &[u8]) {
+        let before = (self.screen.modes().alt_screen, self.screen.generation());
         self.parser.advance(&mut self.screen, bytes);
+        let after = (self.screen.modes().alt_screen, self.screen.generation());
+        if before != after {
+            self.selection_clear();
+        }
     }
 
     pub fn screen(&self) -> &Screen {
@@ -212,5 +221,38 @@ mod tests {
         let mut out = [0u8; 16];
         let n = t.screen_mut().take_responses(&mut out);
         assert_eq!(&out[..n], b"\x1b[1;1R");
+    }
+
+    #[test]
+    fn alt_screen_switch_clears_selection() {
+        let mut t = Term::new(5, 2, 0);
+        t.feed(b"AAA");
+        t.selection_start(0, 0, SelectionMode::Normal);
+        t.selection_extend(2, 0);
+        assert_eq!(t.selection_text(), "AAA");
+        t.feed(b"\x1b[?1049h");
+        assert!(t.selection().is_none());
+        t.selection_start(0, 0, SelectionMode::Normal);
+        t.feed(b"\x1b[?1049l");
+        assert!(t.selection().is_none());
+        assert_eq!(t.selection_text(), "");
+    }
+
+    #[test]
+    fn full_reset_clears_selection() {
+        let mut t = Term::new(5, 2, 0);
+        t.feed(b"AAA");
+        t.selection_start(0, 0, SelectionMode::Normal);
+        t.feed(b"\x1bc");
+        assert!(t.selection().is_none());
+    }
+
+    #[test]
+    fn alt_screen_round_trip_inside_one_feed_keeps_selection() {
+        let mut t = Term::new(5, 2, 0);
+        t.feed(b"AAA");
+        t.selection_start(0, 0, SelectionMode::Normal);
+        t.feed(b"\x1b[?1049hx\x1b[?1049l");
+        assert!(t.selection().is_some());
     }
 }

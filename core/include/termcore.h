@@ -68,22 +68,54 @@ typedef struct {
     uint8_t r, g, b;
 } TermRgb;
 
+/* Creates a terminal. cols and rows must be at least 1; scrollback is
+ * clamped to TERM_MAX_SCROLLBACK. Returns NULL on bad arguments. */
+#define TERM_MAX_SCROLLBACK 1000000u
 Term *term_new(uint16_t cols, uint16_t rows, uint32_t scrollback);
 void term_free(Term *term);
+
+/* Feeds raw PTY output. Never fails on content; only on a NULL term. */
 int32_t term_feed(Term *term, const uint8_t *bytes, size_t len);
 int32_t term_resize(Term *term, uint16_t cols, uint16_t rows);
+
+/* Copies the visible grid (viewport applied) as packed cells in row
+ * major order. out needs cols * rows entries or TERM_ERR_SMALL is
+ * returned and nothing is written. */
 int32_t term_grid(Term *term, uint64_t *out, size_t len);
+
+/* Copies and clears the dirty row bitmap, one bit per visible row.
+ * out needs (rows + 63) / 64 words or TERM_ERR_SMALL is returned and
+ * the bitmap is left untouched. */
 int32_t term_dirty_rows(Term *term, uint64_t *out, size_t len);
+
+/* visible is 0 while the cursor is hidden or the viewport is scrolled
+ * back; do not draw it then. */
 int32_t term_cursor(Term *term, TermCursor *out);
 int32_t term_modes(Term *term, TermModes *out);
+
+/* Positive delta scrolls towards older content. Clamped. */
 int32_t term_scroll_viewport(Term *term, int32_t delta);
+
+/* Selection coordinates are visible cells (viewport applied).
+ * mode: 0 normal, 1 word, 2 line. TERM_ERR_ARG if out of range. */
 int32_t term_selection_start(Term *term, uint16_t col, uint16_t row, uint8_t mode);
 int32_t term_selection_extend(Term *term, uint16_t col, uint16_t row);
 int32_t term_selection_clear(Term *term);
+
+/* Text getters: return the full UTF-8 length in bytes and write at
+ * most len bytes, no NUL terminator. Call once with out = NULL to size
+ * a buffer, then again with the buffer. A short buffer may cut a
+ * multi-byte character. */
 size_t term_selection_text(Term *term, uint8_t *out, size_t len);
-size_t term_responses(Term *term, uint8_t *out, size_t len);
-size_t term_colors(Term *term, TermRgb *out, size_t len);
 size_t term_title(Term *term, uint8_t *out, size_t len);
+
+/* Drains up to len bytes the terminal wants written back to the PTY
+ * (cursor position and device attribute replies). Returns the count. */
+size_t term_responses(Term *term, uint8_t *out, size_t len);
+
+/* Copies the 24-bit overflow colours (cell index 256 upward) and
+ * returns how many exist in total. Copies at most len entries. */
+size_t term_colors(Term *term, TermRgb *out, size_t len);
 
 #ifdef __cplusplus
 }

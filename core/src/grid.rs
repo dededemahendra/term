@@ -149,7 +149,8 @@ impl Grid {
     }
 
     /// Copies the dirty bitmap into `out` and clears it. Extra words in
-    /// `out` are zeroed; a short `out` receives a prefix.
+    /// `out` are zeroed. A short `out` receives a prefix and the bits
+    /// that did not fit are lost, so size it with `dirty_words()`.
     pub fn take_dirty(&mut self, out: &mut [u64]) {
         let n = out.len().min(self.dirty.len());
         out[..n].copy_from_slice(&self.dirty[..n]);
@@ -160,18 +161,24 @@ impl Grid {
     }
 
     /// Scrolls the whole screen up by `n`. Top rows enter scrollback and
-    /// `n` rows cleared to `template` appear at the bottom.
+    /// `n` rows cleared to `template` appear at the bottom. Closed form,
+    /// so a huge `n` from an escape sequence costs at most one pass over
+    /// the ring.
     pub fn scroll_up_full(&mut self, n: usize, template: Cell) {
+        if n == 0 {
+            return;
+        }
         let capacity = self.capacity();
-        for _ in 0..n {
-            if self.len < capacity {
-                self.len += 1;
-            } else {
-                self.start = (self.start + 1) % capacity;
-                self.dropped += 1;
-            }
-            let i = self.storage_index(self.len - 1);
-            self.storage[i].clear(template);
+        let total = self.len.saturating_add(n);
+        let evicted = total.saturating_sub(capacity);
+        self.start = (self.start + evicted) % capacity;
+        self.dropped += evicted as u64;
+        self.len = total.min(capacity);
+        // Only the newest min(n, capacity) live rows are fresh.
+        let fresh = n.min(capacity);
+        for live in (self.len - fresh)..self.len {
+            let idx = self.storage_index(live);
+            self.storage[idx].clear(template);
         }
         if self.viewport > 0 {
             self.viewport = (self.viewport + n).min(self.scrollback_len());
@@ -209,10 +216,13 @@ impl Grid {
     /// Scrolls rows `top..=bottom` up by `n`. Rows leaving the top of a
     /// partial region are lost; a full screen region uses scrollback.
     pub fn scroll_up_region(&mut self, top: usize, bottom: usize, n: usize, template: Cell) {
+        if n == 0 {
+            return;
+        }
         if top == 0 && bottom == self.rows - 1 {
             return self.scroll_up_full(n, template);
         }
-        if top > bottom || bottom >= self.rows || n == 0 {
+        if top > bottom || bottom >= self.rows {
             return;
         }
         let n = n.min(bottom - top + 1);
@@ -409,6 +419,35 @@ mod tests {
         g.scroll_up_full(10, Cell::default());
         assert_eq!(g.scrollback_len(), 1);
         assert_eq!(g.first_line_id(), 9);
+    }
+
+    #[test]
+    fn scroll_up_full_by_huge_n_is_closed_form() {
+        let mut g = Grid::new(1, 3, 2);
+        for r in 0..3 {
+            g.set_cell(0, r, ch((b'a' + r as u8) as char));
+        }
+        g.scroll_up_full(65_535, Cell::default());
+        assert_eq!(g.scrollback_len(), 2);
+        assert_eq!(g.line_count(), 5);
+        assert_eq!(g.first_line_id(), 65_535 + 3 - 5);
+        for r in 0..3 {
+            assert_eq!(row_text(&g, r), "");
+        }
+        assert!(g.line(g.first_line_id()).is_some());
+        assert!(g.line(g.first_line_id() - 1).is_none());
+    }
+
+    #[test]
+    fn scroll_up_full_by_zero_changes_nothing() {
+        let mut g = filled(1, 2, 2);
+        let mut words = [0u64; 1];
+        g.take_dirty(&mut words);
+        g.scroll_up_region(0, 1, 0, Cell::default());
+        g.scroll_up_full(0, Cell::default());
+        assert_eq!(row_text(&g, 0), "0");
+        assert!(!g.is_dirty(0));
+        assert_eq!(g.first_line_id(), 0);
     }
 
     #[test]

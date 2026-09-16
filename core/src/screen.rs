@@ -104,6 +104,25 @@ fn ext_arg(p: &[u16], it: &mut ParamsIter<'_>, index: usize) -> Option<u16> {
     }
 }
 
+/// Consumes the arguments of an extended colour spec without using
+/// them. Colon form carries everything inside `p` already.
+fn skip_extended_color(p: &[u16], it: &mut ParamsIter<'_>) {
+    if p.len() > 1 {
+        return;
+    }
+    match it.next().map(|next| next[0]) {
+        Some(5) => {
+            it.next();
+        }
+        Some(2) => {
+            it.next();
+            it.next();
+            it.next();
+        }
+        _ => {}
+    }
+}
+
 pub struct Screen {
     primary: Grid,
     alt: Grid,
@@ -123,6 +142,8 @@ pub struct Screen {
     pending_zwj: bool,
     /// True when the cell before the cursor was written by the last print.
     just_printed: bool,
+    /// Bumped by a full reset so callers can tell the screen was replaced.
+    generation: u32,
 }
 
 impl Screen {
@@ -146,7 +167,12 @@ impl Screen {
             title: String::new(),
             pending_zwj: false,
             just_printed: false,
+            generation: 0,
         }
+    }
+
+    pub fn generation(&self) -> u32 {
+        self.generation
     }
 
     pub fn grid(&self) -> &Grid {
@@ -346,8 +372,13 @@ impl Screen {
         self.responses.len()
     }
 
+    /// Queues bytes for the shell. Bounded so a flood of status queries
+    /// cannot grow memory while the shell is not draining.
     fn report(&mut self, s: &str) {
-        self.responses.extend_from_slice(s.as_bytes());
+        const MAX_PENDING: usize = 64 * 1024;
+        if self.responses.len() + s.len() <= MAX_PENDING {
+            self.responses.extend_from_slice(s.as_bytes());
+        }
     }
 
     /// Changes the screen size. Cursor follows its row when rows move
@@ -449,14 +480,12 @@ impl Screen {
                 }
                 self.erase_in_row(row, 0, col);
             }
-            2 | 3 => {
+            2 => {
                 for r in 0..rows {
                     self.erase_in_row(r, 0, cols - 1);
                 }
-                if mode == 3 {
-                    self.grid_mut().clear_scrollback();
-                }
             }
+            3 => self.grid_mut().clear_scrollback(),
             _ => {}
         }
     }
@@ -527,6 +556,8 @@ impl Screen {
         }
     }
 
+    /// REP. Capped at one screen width; xterm would keep wrapping, but a
+    /// 65,535 repeat is only ever adversarial.
     fn repeat_last(&mut self, n: usize) {
         if let Some(c) = self.last_char {
             let width = c.width().unwrap_or(1).clamp(1, 2);
@@ -645,6 +676,10 @@ impl Screen {
                     }
                 }
                 49 => self.template = self.template.with_bg(DEFAULT_COLOR),
+                // Underline colour is not stored in v1, but its arguments
+                // must not be read as further SGR codes.
+                58 => skip_extended_color(p, &mut it),
+                59 => {}
                 90..=97 => self.template = self.template.with_fg(p[0] - 90 + 8),
                 100..=107 => self.template = self.template.with_bg(p[0] - 100 + 8),
                 _ => {}
@@ -762,7 +797,9 @@ impl Screen {
     /// RIS: back to a freshly created screen of the same size.
     fn reset(&mut self) {
         let (cols, rows, scrollback) = (self.cols(), self.rows(), self.primary.scrollback_capacity());
+        let generation = self.generation.wrapping_add(1);
         *self = Screen::new(cols, rows, scrollback);
+        self.generation = generation;
     }
 
     /// DECALN: fill the screen with E, reset margins, home the cursor.
@@ -816,6 +853,7 @@ impl Perform for Screen {
 
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.just_printed = false;
+        self.pending_zwj = false;
         if ignore {
             return;
         }
@@ -861,17 +899,18 @@ impl Perform for Screen {
                 self.grid_mut().scroll_down_region(top, bottom, n, blank);
             }
             (b"", 'r') => {
-                let bottom = param(params, 1, self.rows() as u16) as usize;
+                let rows = self.rows().min(u16::MAX as usize) as u16;
+                let bottom = param(params, 1, rows) as usize;
                 self.set_scroll_region(n - 1, bottom - 1);
             }
             (b"", 'b') => self.repeat_last(n),
             (b"", 'I') => {
-                for _ in 0..n {
+                for _ in 0..n.min(self.cols()) {
                     self.tab_forward();
                 }
             }
             (b"", 'Z') => {
-                for _ in 0..n {
+                for _ in 0..n.min(self.cols()) {
                     self.tab_back();
                 }
             }
@@ -898,6 +937,7 @@ impl Perform for Screen {
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         self.just_printed = false;
+        self.pending_zwj = false;
         match (intermediates, byte) {
             (b"", b'7') => self.save_cursor(),
             (b"", b'8') => self.restore_cursor(),
@@ -920,6 +960,8 @@ impl Perform for Screen {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        self.just_printed = false;
+        self.pending_zwj = false;
         if let [kind, text, ..] = params {
             let kind: &[u8] = kind;
             if kind == b"0" || kind == b"2" {
@@ -1104,7 +1146,7 @@ mod tests {
         assert_eq!(s.grid().scrollback_len(), 1);
         feed(&mut s, b"\x1b[3J");
         assert_eq!(s.grid().scrollback_len(), 0);
-        assert_eq!(s.row_text(0), "");
+        assert_eq!(s.row_text(0), "b");
     }
 
     #[test]
@@ -1171,6 +1213,15 @@ mod tests {
     }
 
     #[test]
+    fn huge_scroll_up_is_cheap_and_correct() {
+        let mut s = screen(5, 3);
+        feed(&mut s, b"abc\x1b[65535S");
+        assert_eq!(s.row_text(0), "");
+        assert_eq!(s.grid().scrollback_len(), 10);
+        assert_eq!(s.grid().first_line_id(), 65_535 + 3 - 13);
+    }
+
+    #[test]
     fn dsr_reports_position_and_status() {
         let mut s = screen(10, 5);
         feed(&mut s, b"\x1b[2;5H\x1b[6n\x1b[5n");
@@ -1190,6 +1241,15 @@ mod tests {
     }
 
     #[test]
+    fn response_buffer_is_bounded() {
+        let mut s = screen(10, 1);
+        let query = b"\x1b[6n".repeat(20_000);
+        feed(&mut s, &query);
+        assert!(s.responses_len() <= 64 * 1024);
+        assert!(s.responses_len() > 60 * 1024);
+    }
+
+    #[test]
     fn rep_repeats_last_char() {
         let mut s = screen(10, 1);
         feed(&mut s, b"ab\x1b[3b");
@@ -1205,6 +1265,15 @@ mod tests {
         assert_eq!(s.cursor().col, 8);
         feed(&mut s, b"\x1b[3g\t");
         assert_eq!(s.cursor().col, 39);
+    }
+
+    #[test]
+    fn huge_tab_counts_are_bounded() {
+        let mut s = screen(40, 1);
+        feed(&mut s, b"\x1b[65535I");
+        assert_eq!(s.cursor().col, 39);
+        feed(&mut s, b"\x1b[65535Z");
+        assert_eq!(s.cursor().col, 0);
     }
 
     #[test]
@@ -1334,6 +1403,17 @@ mod tests {
         feed(&mut s, b"\x1b[38;2;1mX\x1b[38;5mY");
         assert_eq!(s.grid().cell(0, 0).fg(), crate::cell::DEFAULT_COLOR);
         assert_eq!(s.grid().cell(1, 0).fg(), crate::cell::DEFAULT_COLOR);
+    }
+
+    #[test]
+    fn sgr_underline_colour_is_skipped_not_misread() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[1;31m\x1b[58;2;255;0;0mX\x1b[58:2::1:2:3mY\x1b[58;5;200mZ\x1b[59mW");
+        for col in 0..4 {
+            let c = s.grid().cell(col, 0);
+            assert_eq!(c.flags(), flags::BOLD, "column {col}");
+            assert_eq!(c.fg(), 1, "column {col}");
+        }
     }
 
     #[test]
@@ -1585,5 +1665,16 @@ mod tests {
         let mut s = screen(10, 1);
         feed(&mut s, "a\u{200D}\rb".as_bytes());
         assert_eq!(s.row_text(0), "b");
+    }
+
+    #[test]
+    fn print_state_does_not_leak_across_escape_sequences() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "a\u{200D}\x1b[1mZ".as_bytes());
+        assert_eq!(s.row_text(0), "aZ");
+        let mut s = screen(10, 1);
+        feed(&mut s, "a\x1b]0;t\x07\u{FE0F}x".as_bytes());
+        assert_eq!(s.row_text(0), "ax");
+        assert!(!s.grid().cell(0, 0).has(flags::WIDE));
     }
 }

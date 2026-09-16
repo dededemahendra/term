@@ -20,6 +20,9 @@ pub const TERM_ERR_NULL: i32 = 1;
 pub const TERM_ERR_SMALL: i32 = 2;
 pub const TERM_ERR_ARG: i32 = 3;
 
+/// Upper bound on scrollback rows accepted by `term_new`.
+pub const TERM_MAX_SCROLLBACK: u32 = 1_000_000;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TermCursor {
@@ -45,7 +48,8 @@ pub extern "C" fn term_new(cols: u16, rows: u16, scrollback: u32) -> *mut Term {
     if cols == 0 || rows == 0 {
         return ptr::null_mut();
     }
-    Box::into_raw(Box::new(Term::new(cols as usize, rows as usize, scrollback as usize)))
+    let scrollback = scrollback.min(TERM_MAX_SCROLLBACK) as usize;
+    Box::into_raw(Box::new(Term::new(cols as usize, rows as usize, scrollback)))
 }
 
 /// # Safety

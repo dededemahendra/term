@@ -90,3 +90,33 @@ fn null_pointers_are_rejected() {
         term_free(ptr::null_mut());
     }
 }
+
+#[test]
+fn scrolled_back_viewport_hides_cursor_and_shows_history() {
+    unsafe {
+        let t = term_new(4, 2, 5);
+        let input = b"a\r\nb\r\nc";
+        term_feed(t, input.as_ptr(), input.len());
+        assert_eq!(term_scroll_viewport(t, 1), TERM_OK);
+        let mut cursor = TermCursor::default();
+        assert_eq!(term_cursor(t, &mut cursor), TERM_OK);
+        assert_eq!(cursor.visible, 0);
+        let mut cells = vec![0u64; 8];
+        assert_eq!(term_grid(t, cells.as_mut_ptr(), 8), TERM_OK);
+        assert_eq!(cells[0] & 0x1F_FFFF, 'a' as u64);
+        assert_eq!(term_scroll_viewport(t, -1), TERM_OK);
+        assert_eq!(term_cursor(t, &mut cursor), TERM_OK);
+        assert_eq!(cursor.visible, 1);
+        term_free(t);
+    }
+}
+
+#[test]
+fn scrollback_is_clamped() {
+    unsafe {
+        let t = term_new(2, 2, u32::MAX);
+        assert!(!t.is_null());
+        assert_eq!((*t).screen().grid().scrollback_capacity(), TERM_MAX_SCROLLBACK as usize);
+        term_free(t);
+    }
+}

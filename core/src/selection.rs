@@ -39,6 +39,8 @@ fn is_word_char(c: char) -> bool {
     !c.is_whitespace() && !"()[]{}<>'\",;|".contains(c)
 }
 
+// Rows always have at least one cell: `Grid` clamps `cols` to 1 or more,
+// so `cells.len() - 1` below cannot underflow.
 fn word_start(grid: &Grid, p: Point) -> usize {
     let Some(row) = grid.line(p.line) else { return p.col };
     let cells = row.cells();
