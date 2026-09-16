@@ -120,6 +120,7 @@ pub struct Screen {
     saved_primary: Option<SavedCursor>,
     saved_alt: Option<SavedCursor>,
     title: String,
+    pending_zwj: bool,
 }
 
 impl Screen {
@@ -141,6 +142,7 @@ impl Screen {
             saved_primary: None,
             saved_alt: None,
             title: String::new(),
+            pending_zwj: false,
         }
     }
 
@@ -301,6 +303,31 @@ impl Screen {
             self.cursor.pending_wrap = false;
         }
         self.last_char = Some(c);
+    }
+
+    /// VS16 after a narrow glyph: make it wide if the next column is free.
+    fn emoji_presentation(&mut self) {
+        let cols = self.cols();
+        let row = self.cursor.row;
+        if self.cursor.pending_wrap || self.cursor.col == 0 {
+            return;
+        }
+        let col = self.cursor.col - 1;
+        let prev = self.grid().cell(col, row);
+        if prev.has(flags::WIDE) || prev.has(flags::WIDE_SPACER) || col + 1 >= cols {
+            return;
+        }
+        let wide = prev.with_flags(prev.flags() | flags::WIDE);
+        let spacer = prev.with_codepoint(' ').with_flags(prev.flags() | flags::WIDE_SPACER);
+        self.split_wide(col + 1, row);
+        self.grid_mut().set_cell(col, row, wide);
+        self.grid_mut().set_cell(col + 1, row, spacer);
+        if col + 2 >= cols {
+            self.cursor.col = cols - 1;
+            self.cursor.pending_wrap = true;
+        } else {
+            self.cursor.col = col + 2;
+        }
     }
 
     /// Drains up to `out.len()` pending response bytes into `out`.
@@ -747,6 +774,22 @@ impl Screen {
 
 impl Perform for Screen {
     fn print(&mut self, c: char) {
+        match c {
+            '\u{200D}' => {
+                self.pending_zwj = true;
+                return;
+            }
+            '\u{FE0F}' => {
+                self.emoji_presentation();
+                return;
+            }
+            '\u{FE0E}' | '\u{1F3FB}'..='\u{1F3FF}' => return,
+            _ => {}
+        }
+        if self.pending_zwj {
+            self.pending_zwj = false;
+            return;
+        }
         let width = match c.width() {
             Some(w) if w > 0 => w.min(2),
             _ => return,
@@ -755,6 +798,7 @@ impl Perform for Screen {
     }
 
     fn execute(&mut self, byte: u8) {
+        self.pending_zwj = false;
         match byte {
             0x08 => self.backspace(),
             0x09 => self.tab_forward(),
@@ -1455,5 +1499,70 @@ mod tests {
         let mut s = screen(10, 1);
         feed(&mut s, b"\x1b(B\x1b)0X");
         assert_eq!(s.row_text(0), "X");
+    }
+
+    #[test]
+    fn skin_tone_modifier_collapses_into_base() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "👍🏽x".as_bytes());
+        let base = s.grid().cell(0, 0);
+        assert_eq!(base.codepoint(), '👍');
+        assert!(base.has(flags::WIDE));
+        assert!(s.grid().cell(1, 0).has(flags::WIDE_SPACER));
+        assert_eq!(s.grid().cell(2, 0).codepoint(), 'x');
+    }
+
+    #[test]
+    fn zwj_sequence_keeps_first_emoji() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "👨\u{200D}👩\u{200D}👧x".as_bytes());
+        assert_eq!(s.grid().cell(0, 0).codepoint(), '👨');
+        assert!(s.grid().cell(0, 0).has(flags::WIDE));
+        assert_eq!(s.grid().cell(2, 0).codepoint(), 'x');
+        assert_eq!(s.cursor().col, 3);
+    }
+
+    #[test]
+    fn vs16_upgrades_narrow_char_to_wide() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "\u{2764}\u{FE0F}x".as_bytes());
+        let heart = s.grid().cell(0, 0);
+        assert_eq!(heart.codepoint(), '\u{2764}');
+        assert!(heart.has(flags::WIDE));
+        assert!(s.grid().cell(1, 0).has(flags::WIDE_SPACER));
+        assert_eq!(s.grid().cell(2, 0).codepoint(), 'x');
+        assert_eq!(s.cursor().col, 3);
+    }
+
+    #[test]
+    fn vs16_in_last_column_stays_narrow() {
+        let mut s = screen(2, 1);
+        feed(&mut s, "a\u{2764}\u{FE0F}".as_bytes());
+        let heart = s.grid().cell(1, 0);
+        assert_eq!(heart.codepoint(), '\u{2764}');
+        assert!(!heart.has(flags::WIDE));
+        assert!(s.cursor().pending_wrap);
+    }
+
+    #[test]
+    fn combining_marks_are_dropped() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "e\u{0301}x".as_bytes());
+        assert_eq!(s.row_text(0), "ex");
+    }
+
+    #[test]
+    fn vs15_is_ignored() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "\u{2603}\u{FE0E}x".as_bytes());
+        assert_eq!(s.row_text(0), "\u{2603}x");
+        assert!(!s.grid().cell(0, 0).has(flags::WIDE));
+    }
+
+    #[test]
+    fn zwj_state_does_not_leak_across_control_chars() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "a\u{200D}\rb".as_bytes());
+        assert_eq!(s.row_text(0), "b");
     }
 }
