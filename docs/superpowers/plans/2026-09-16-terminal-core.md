@@ -2951,7 +2951,7 @@ git commit -m "feat(core): add modes, alternate screen, cursor save and restore,
 - Modify: `core/src/screen.rs`
 
 **Interfaces:**
-- Changes `print` on the `Perform` impl. New field `pending_zwj: bool`. Private `emoji_presentation()`.
+- Changes `print` on the `Perform` impl. New fields `pending_zwj: bool` and `just_printed: bool` (set by `put_char`, cleared by `execute`, `csi_dispatch`, `esc_dispatch` and `resize`). Private `emoji_presentation()`, which acts only when `just_printed` is set.
 - Rule: a zero width joiner drops the next printable character (so a ZWJ family collapses to its first emoji). Skin tone modifiers and variation selector 15 are dropped. Variation selector 16 upgrades the previous narrow cell to wide when there is room. Combining marks and other zero width characters are dropped.
 
 - [ ] **Step 1: Write the failing tests**
@@ -3018,6 +3018,19 @@ Append inside `mod tests` in `core/src/screen.rs`:
     }
 
     #[test]
+    fn vs16_after_a_control_character_is_a_noop() {
+        let mut s = screen(10, 1);
+        feed(&mut s, "\t\u{FE0F}x".as_bytes());
+        assert_eq!(s.row_text(0), "        x");
+        assert_eq!(s.cursor().col, 9);
+        assert!(!s.grid().cell(7, 0).has(flags::WIDE));
+        let mut s = screen(10, 1);
+        feed(&mut s, "a\x1b[3G\u{FE0F}x".as_bytes());
+        assert_eq!(s.row_text(0), "a x");
+        assert!(!s.grid().cell(1, 0).has(flags::WIDE));
+    }
+
+    #[test]
     fn zwj_state_does_not_leak_across_control_chars() {
         let mut s = screen(10, 1);
         feed(&mut s, "a\u{200D}\rb".as_bytes());
@@ -3032,15 +3045,20 @@ Expected: `skin_tone_modifier_collapses_into_base`, `zwj_sequence_keeps_first_em
 
 - [ ] **Step 3: Write the implementation**
 
-Add a field to `Screen` (after `title`) and initialise it in `new`:
+Add two fields to `Screen` (after `title`) and initialise them in `new`:
 
 ```rust
     pending_zwj: bool,
+    /// True when the cell before the cursor was written by the last print.
+    just_printed: bool,
 ```
 
 ```rust
             pending_zwj: false,
+            just_printed: false,
 ```
+
+In `put_char`, after `self.last_char = Some(c);`, add `self.just_printed = true;`. Add `self.just_printed = false;` as the first line of `csi_dispatch` and of `esc_dispatch`, and in `resize` after `self.cursor.pending_wrap = false;`.
 
 Add to `impl Screen`:
 
@@ -3049,7 +3067,7 @@ Add to `impl Screen`:
     fn emoji_presentation(&mut self) {
         let cols = self.cols();
         let row = self.cursor.row;
-        if self.cursor.pending_wrap || self.cursor.col == 0 {
+        if !self.just_printed || self.cursor.pending_wrap || self.cursor.col == 0 {
             return;
         }
         let col = self.cursor.col - 1;
@@ -3099,16 +3117,17 @@ Replace `print` in `impl Perform for Screen` with:
     }
 ```
 
-Add as the first line of `execute`:
+Add as the first lines of `execute`:
 
 ```rust
         self.pending_zwj = false;
+        self.just_printed = false;
 ```
 
 - [ ] **Step 4: Run to verify pass**
 
 Run: `cargo test -p termcore screen`
-Expected: 63 passed.
+Expected: 64 passed.
 
 - [ ] **Step 5: Commit**
 
