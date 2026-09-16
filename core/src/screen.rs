@@ -3,7 +3,7 @@
 //! it directly.
 
 use unicode_width::UnicodeWidthChar;
-use vte::Perform;
+use vte::{Params, Perform};
 
 use crate::cell::{flags, Cell, DEFAULT_COLOR};
 use crate::grid::Grid;
@@ -71,6 +71,19 @@ fn default_tabs(cols: usize) -> Vec<bool> {
     (0..cols).map(|c| c % 8 == 0).collect()
 }
 
+/// Parameter `index`, with 0 and absent both meaning `default`.
+fn param(params: &Params, index: usize, default: u16) -> u16 {
+    match params.iter().nth(index).and_then(|p| p.first().copied()) {
+        Some(0) | None => default,
+        Some(v) => v,
+    }
+}
+
+/// Parameter `index`, 0 when absent. For selectors where 0 is meaningful.
+fn param0(params: &Params, index: usize) -> u16 {
+    params.iter().nth(index).and_then(|p| p.first().copied()).unwrap_or(0)
+}
+
 pub struct Screen {
     primary: Grid,
     alt: Grid,
@@ -81,6 +94,8 @@ pub struct Screen {
     scroll_bottom: usize,
     tabs: Vec<bool>,
     modes: Modes,
+    responses: Vec<u8>,
+    last_char: Option<char>,
 }
 
 impl Screen {
@@ -96,6 +111,8 @@ impl Screen {
             scroll_bottom: rows - 1,
             tabs: default_tabs(cols),
             modes: Modes::default(),
+            responses: Vec::new(),
+            last_char: None,
         }
     }
 
@@ -255,6 +272,253 @@ impl Screen {
             self.cursor.col = next;
             self.cursor.pending_wrap = false;
         }
+        self.last_char = Some(c);
+    }
+
+    /// Drains up to `out.len()` pending response bytes into `out`.
+    pub fn take_responses(&mut self, out: &mut [u8]) -> usize {
+        let n = out.len().min(self.responses.len());
+        out[..n].copy_from_slice(&self.responses[..n]);
+        self.responses.drain(..n);
+        n
+    }
+
+    pub fn responses_len(&self) -> usize {
+        self.responses.len()
+    }
+
+    fn report(&mut self, s: &str) {
+        self.responses.extend_from_slice(s.as_bytes());
+    }
+
+    /// Changes the screen size. Cursor follows its row when rows move
+    /// into or out of scrollback. Scroll region and tab stops reset.
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        let old_rows = self.rows();
+        let blank = self.blank();
+        let pulled = if rows > old_rows {
+            (rows - old_rows).min(self.grid().scrollback_len())
+        } else {
+            0
+        };
+        self.primary.resize(cols, rows, blank);
+        self.alt.resize(cols, rows, blank);
+        if rows < old_rows {
+            self.cursor.row = self.cursor.row.saturating_sub(old_rows - rows);
+        } else {
+            self.cursor.row += pulled;
+        }
+        self.cursor.row = self.cursor.row.min(rows - 1);
+        self.cursor.col = self.cursor.col.min(cols - 1);
+        self.cursor.pending_wrap = false;
+        self.scroll_top = 0;
+        self.scroll_bottom = rows - 1;
+        self.tabs = default_tabs(cols);
+    }
+
+    /// Absolute placement. `row` is relative to the scroll region top
+    /// when origin mode is on.
+    fn move_cursor_to(&mut self, row: usize, col: usize) {
+        let (min_row, max_row) = if self.modes.origin {
+            (self.scroll_top, self.scroll_bottom)
+        } else {
+            (0, self.rows() - 1)
+        };
+        self.cursor.row = (min_row + row).min(max_row);
+        self.cursor.col = col.min(self.cols() - 1);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn cursor_up(&mut self, n: usize) {
+        let bound = if self.cursor.row >= self.scroll_top { self.scroll_top } else { 0 };
+        self.cursor.row = self.cursor.row.saturating_sub(n).max(bound);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn cursor_down(&mut self, n: usize) {
+        let bound = if self.cursor.row <= self.scroll_bottom {
+            self.scroll_bottom
+        } else {
+            self.rows() - 1
+        };
+        self.cursor.row = (self.cursor.row + n).min(bound);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn cursor_forward(&mut self, n: usize) {
+        self.cursor.col = (self.cursor.col + n).min(self.cols() - 1);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn cursor_back(&mut self, n: usize) {
+        self.cursor.col = self.cursor.col.saturating_sub(n);
+        self.cursor.pending_wrap = false;
+    }
+
+    /// Blanks `from..=to` on `row`. Clears the wrap flag when the row end is included.
+    fn erase_in_row(&mut self, row: usize, from: usize, to: usize) {
+        let cols = self.cols();
+        let to = to.min(cols - 1);
+        if from > to {
+            return;
+        }
+        let blank = self.blank();
+        self.split_wide(from, row);
+        self.split_wide(to, row);
+        let r = self.grid_mut().row_mut(row);
+        r.cells_mut()[from..=to].fill(blank);
+        if to == cols - 1 {
+            r.wrapped = false;
+        }
+    }
+
+    fn erase_display(&mut self, mode: u16) {
+        let (col, row, rows, cols) = (self.cursor.col, self.cursor.row, self.rows(), self.cols());
+        match mode {
+            0 => {
+                self.erase_in_row(row, col, cols - 1);
+                for r in row + 1..rows {
+                    self.erase_in_row(r, 0, cols - 1);
+                }
+            }
+            1 => {
+                for r in 0..row {
+                    self.erase_in_row(r, 0, cols - 1);
+                }
+                self.erase_in_row(row, 0, col);
+            }
+            2 | 3 => {
+                for r in 0..rows {
+                    self.erase_in_row(r, 0, cols - 1);
+                }
+                if mode == 3 {
+                    self.grid_mut().clear_scrollback();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn erase_line(&mut self, mode: u16) {
+        let (col, row, cols) = (self.cursor.col, self.cursor.row, self.cols());
+        match mode {
+            0 => self.erase_in_row(row, col, cols - 1),
+            1 => self.erase_in_row(row, 0, col),
+            2 => self.erase_in_row(row, 0, cols - 1),
+            _ => {}
+        }
+    }
+
+    fn insert_blanks(&mut self, n: usize) {
+        let (col, row, cols, blank) = (self.cursor.col, self.cursor.row, self.cols(), self.blank());
+        let n = n.min(cols - col);
+        self.split_wide(col, row);
+        let cells = self.grid_mut().row_mut(row).cells_mut();
+        cells[col..].rotate_right(n);
+        cells[col..col + n].fill(blank);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn delete_chars(&mut self, n: usize) {
+        let (col, row, cols, blank) = (self.cursor.col, self.cursor.row, self.cols(), self.blank());
+        let n = n.min(cols - col);
+        self.split_wide(col, row);
+        let cells = self.grid_mut().row_mut(row).cells_mut();
+        cells[col..].rotate_left(n);
+        cells[cols - n..].fill(blank);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn erase_chars(&mut self, n: usize) {
+        let (col, row, cols) = (self.cursor.col, self.cursor.row, self.cols());
+        let n = n.min(cols - col).max(1);
+        self.erase_in_row(row, col, col + n - 1);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn insert_lines(&mut self, n: usize) {
+        let row = self.cursor.row;
+        if row < self.scroll_top || row > self.scroll_bottom {
+            return;
+        }
+        let (bottom, blank) = (self.scroll_bottom, self.blank());
+        self.grid_mut().scroll_down_region(row, bottom, n, blank);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn delete_lines(&mut self, n: usize) {
+        let row = self.cursor.row;
+        if row < self.scroll_top || row > self.scroll_bottom {
+            return;
+        }
+        let (bottom, blank) = (self.scroll_bottom, self.blank());
+        self.grid_mut().scroll_up_region(row, bottom, n, blank);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn set_scroll_region(&mut self, top: usize, bottom: usize) {
+        let bottom = bottom.min(self.rows() - 1);
+        if top < bottom {
+            self.scroll_top = top;
+            self.scroll_bottom = bottom;
+            self.move_cursor_to(0, 0);
+        }
+    }
+
+    fn repeat_last(&mut self, n: usize) {
+        if let Some(c) = self.last_char {
+            let width = c.width().unwrap_or(1).clamp(1, 2);
+            for _ in 0..n.min(self.cols()) {
+                self.put_char(c, width);
+            }
+        }
+    }
+
+    fn tab_back(&mut self) {
+        let mut c = self.cursor.col;
+        while c > 0 {
+            c -= 1;
+            if self.tabs[c] {
+                break;
+            }
+        }
+        self.cursor.col = c;
+        self.cursor.pending_wrap = false;
+    }
+
+    fn device_status(&mut self, what: u16) {
+        match what {
+            5 => self.report("\x1b[0n"),
+            6 => {
+                let row = if self.modes.origin {
+                    self.cursor.row.saturating_sub(self.scroll_top)
+                } else {
+                    self.cursor.row
+                } + 1;
+                let col = self.cursor.col + 1;
+                let s = format!("\x1b[{row};{col}R");
+                self.report(&s);
+            }
+            _ => {}
+        }
+    }
+
+    /// DECSCUSR: 0 and 1 blinking block, 2 steady block, 3 and 4
+    /// underline, 5 and 6 bar. Odd values blink.
+    fn set_cursor_style(&mut self, style: u16) {
+        let (shape, blink) = match style {
+            0 | 1 => (0, true),
+            2 => (0, false),
+            3 => (1, true),
+            4 => (1, false),
+            5 => (2, true),
+            6 => (2, false),
+            _ => return,
+        };
+        self.modes.cursor_shape = shape;
+        self.modes.cursor_blink = blink;
     }
 }
 
@@ -273,6 +537,82 @@ impl Perform for Screen {
             0x09 => self.tab_forward(),
             0x0A | 0x0B | 0x0C => self.linefeed(),
             0x0D => self.carriage_return(),
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if ignore {
+            return;
+        }
+        let n = param(params, 0, 1) as usize;
+        match (intermediates, action) {
+            (b"", 'A') => self.cursor_up(n),
+            (b"", 'B') | (b"", 'e') => self.cursor_down(n),
+            (b"", 'C') | (b"", 'a') => self.cursor_forward(n),
+            (b"", 'D') => self.cursor_back(n),
+            (b"", 'E') => {
+                self.cursor_down(n);
+                self.cursor.col = 0;
+            }
+            (b"", 'F') => {
+                self.cursor_up(n);
+                self.cursor.col = 0;
+            }
+            (b"", 'G') | (b"", '`') => {
+                self.cursor.col = (n - 1).min(self.cols() - 1);
+                self.cursor.pending_wrap = false;
+            }
+            (b"", 'H') | (b"", 'f') => {
+                let col = param(params, 1, 1) as usize;
+                self.move_cursor_to(n - 1, col - 1);
+            }
+            (b"", 'd') => {
+                let col = self.cursor.col;
+                self.move_cursor_to(n - 1, col);
+            }
+            (b"", 'J') => self.erase_display(param0(params, 0)),
+            (b"", 'K') => self.erase_line(param0(params, 0)),
+            (b"", '@') => self.insert_blanks(n),
+            (b"", 'P') => self.delete_chars(n),
+            (b"", 'X') => self.erase_chars(n),
+            (b"", 'L') => self.insert_lines(n),
+            (b"", 'M') => self.delete_lines(n),
+            (b"", 'S') => {
+                let (top, bottom, blank) = (self.scroll_top, self.scroll_bottom, self.blank());
+                self.grid_mut().scroll_up_region(top, bottom, n, blank);
+            }
+            (b"", 'T') => {
+                let (top, bottom, blank) = (self.scroll_top, self.scroll_bottom, self.blank());
+                self.grid_mut().scroll_down_region(top, bottom, n, blank);
+            }
+            (b"", 'r') => {
+                let bottom = param(params, 1, self.rows() as u16) as usize;
+                self.set_scroll_region(n - 1, bottom - 1);
+            }
+            (b"", 'b') => self.repeat_last(n),
+            (b"", 'I') => {
+                for _ in 0..n {
+                    self.tab_forward();
+                }
+            }
+            (b"", 'Z') => {
+                for _ in 0..n {
+                    self.tab_back();
+                }
+            }
+            (b"", 'g') => match param0(params, 0) {
+                0 => {
+                    let c = self.cursor.col;
+                    self.tabs[c] = false;
+                }
+                3 => self.tabs.fill(false),
+                _ => {}
+            },
+            (b"", 'n') => self.device_status(param0(params, 0)),
+            (b"", 'c') => self.report("\x1b[?1;2c"),
+            (b">", 'c') => self.report("\x1b[>0;0;0c"),
+            (b" ", 'q') => self.set_cursor_style(param0(params, 0)),
             _ => {}
         }
     }
@@ -394,5 +734,200 @@ mod tests {
         let mut s = screen(10, 1);
         feed(&mut s, b"a\x01b\x7fc");
         assert_eq!(s.row_text(0), "abc");
+    }
+
+    #[test]
+    fn cup_moves_cursor() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[3;4H");
+        assert_eq!((s.cursor().col, s.cursor().row), (3, 2));
+        feed(&mut s, b"\x1b[H");
+        assert_eq!((s.cursor().col, s.cursor().row), (0, 0));
+        feed(&mut s, b"\x1b[99;99f");
+        assert_eq!((s.cursor().col, s.cursor().row), (9, 4));
+    }
+
+    #[test]
+    fn relative_moves_clamp() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[99C");
+        assert_eq!(s.cursor().col, 9);
+        feed(&mut s, b"\x1b[99A");
+        assert_eq!(s.cursor().row, 0);
+        feed(&mut s, b"\x1b[2B");
+        assert_eq!(s.cursor().row, 2);
+        feed(&mut s, b"\x1b[D");
+        assert_eq!(s.cursor().col, 8);
+        feed(&mut s, b"\x1b[E");
+        assert_eq!((s.cursor().col, s.cursor().row), (0, 3));
+        feed(&mut s, b"\x1b[5G\x1b[2d");
+        assert_eq!((s.cursor().col, s.cursor().row), (4, 1));
+    }
+
+    #[test]
+    fn ed_0_clears_to_end_of_screen() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"aaaa\r\nbbbb\r\ncccc\x1b[2;3H\x1b[J");
+        assert_eq!(s.row_text(0), "aaaa");
+        assert_eq!(s.row_text(1), "bb");
+        assert_eq!(s.row_text(2), "");
+    }
+
+    #[test]
+    fn ed_1_clears_to_start_and_ed_2_clears_all() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"aaaa\r\nbbbb\r\ncccc\x1b[2;3H\x1b[1J");
+        assert_eq!(s.row_text(0), "");
+        assert_eq!(s.row_text(1), "   b");
+        assert_eq!(s.row_text(2), "cccc");
+        feed(&mut s, b"\x1b[2J");
+        assert_eq!(s.row_text(2), "");
+        assert_eq!((s.cursor().col, s.cursor().row), (2, 1));
+    }
+
+    #[test]
+    fn ed_3_clears_scrollback() {
+        let mut s = screen(10, 2);
+        feed(&mut s, b"a\r\nb\r\nc");
+        assert_eq!(s.grid().scrollback_len(), 1);
+        feed(&mut s, b"\x1b[3J");
+        assert_eq!(s.grid().scrollback_len(), 0);
+        assert_eq!(s.row_text(0), "");
+    }
+
+    #[test]
+    fn el_variants() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"abcdef\x1b[4G\x1b[K");
+        assert_eq!(s.row_text(0), "abc");
+        let mut s = screen(10, 1);
+        feed(&mut s, b"abcdef\x1b[4G\x1b[1K");
+        assert_eq!(s.row_text(0), "    ef");
+        let mut s = screen(10, 1);
+        feed(&mut s, b"abcdef\x1b[2K");
+        assert_eq!(s.row_text(0), "");
+    }
+
+    #[test]
+    fn ich_and_dch() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"abcdef\x1b[1G\x1b[2@");
+        assert_eq!(s.row_text(0), "  abcdef");
+        feed(&mut s, b"\x1b[3P");
+        assert_eq!(s.row_text(0), "bcdef");
+    }
+
+    #[test]
+    fn ech_blanks_without_shifting() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"abcdef\x1b[2G\x1b[3X");
+        assert_eq!(s.row_text(0), "a   ef");
+    }
+
+    #[test]
+    fn il_and_dl_within_region() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"1\r\n2\r\n3\r\n4\r\n5\x1b[2;4r\x1b[2;1H\x1b[L");
+        let rows: Vec<String> = (0..5).map(|r| s.row_text(r)).collect();
+        assert_eq!(rows, ["1", "", "2", "3", "5"]);
+        feed(&mut s, b"\x1b[2M");
+        let rows: Vec<String> = (0..5).map(|r| s.row_text(r)).collect();
+        assert_eq!(rows, ["1", "3", "", "", "5"]);
+    }
+
+    #[test]
+    fn scroll_region_confines_linefeed() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[2;3r");
+        assert_eq!((s.cursor().col, s.cursor().row), (0, 0));
+        feed(&mut s, b"\x1b[3;1Hx\ny");
+        let rows: Vec<String> = (0..5).map(|r| s.row_text(r)).collect();
+        assert_eq!(rows, ["", "x", " y", "", ""]);
+        assert_eq!(s.grid().scrollback_len(), 0);
+    }
+
+    #[test]
+    fn su_and_sd() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"1\r\n2\r\n3\x1b[S");
+        let rows: Vec<String> = (0..5).map(|r| s.row_text(r)).collect();
+        assert_eq!(rows, ["2", "3", "", "", ""]);
+        assert_eq!(s.grid().scrollback_len(), 1);
+        feed(&mut s, b"\x1b[T");
+        let rows: Vec<String> = (0..5).map(|r| s.row_text(r)).collect();
+        assert_eq!(rows, ["", "2", "3", "", ""]);
+    }
+
+    #[test]
+    fn dsr_reports_position_and_status() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[2;5H\x1b[6n\x1b[5n");
+        let mut out = [0u8; 32];
+        let n = s.take_responses(&mut out);
+        assert_eq!(&out[..n], b"\x1b[2;5R\x1b[0n");
+        assert_eq!(s.responses_len(), 0);
+    }
+
+    #[test]
+    fn da_reports() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[c\x1b[>c");
+        let mut out = [0u8; 32];
+        let n = s.take_responses(&mut out);
+        assert_eq!(&out[..n], b"\x1b[?1;2c\x1b[>0;0;0c");
+    }
+
+    #[test]
+    fn rep_repeats_last_char() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"ab\x1b[3b");
+        assert_eq!(s.row_text(0), "abbbb");
+    }
+
+    #[test]
+    fn tab_stops_cht_cbt_tbc() {
+        let mut s = screen(40, 1);
+        feed(&mut s, b"\x1b[2I");
+        assert_eq!(s.cursor().col, 16);
+        feed(&mut s, b"\x1b[Z");
+        assert_eq!(s.cursor().col, 8);
+        feed(&mut s, b"\x1b[3g\t");
+        assert_eq!(s.cursor().col, 39);
+    }
+
+    #[test]
+    fn decscusr_sets_cursor_shape() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b[4 q");
+        assert_eq!((s.modes().cursor_shape, s.modes().cursor_blink), (1, false));
+        feed(&mut s, b"\x1b[5 q");
+        assert_eq!((s.modes().cursor_shape, s.modes().cursor_blink), (2, true));
+        feed(&mut s, b"\x1b[0 q");
+        assert_eq!((s.modes().cursor_shape, s.modes().cursor_blink), (0, true));
+    }
+
+    #[test]
+    fn resize_clamps_cursor_and_resets_region() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[2;4r\x1b[9;9H");
+        assert_eq!((s.cursor().col, s.cursor().row), (8, 4));
+        s.resize(4, 2);
+        assert_eq!(s.cols(), 4);
+        assert_eq!(s.rows(), 2);
+        assert_eq!((s.cursor().col, s.cursor().row), (3, 1));
+        feed(&mut s, b"\x1b[1;1Ha\nb\nc");
+        assert_eq!(s.row_text(1), "  c");
+        assert_eq!(s.grid().scrollback_len(), 4);
+    }
+
+    #[test]
+    fn resize_taller_moves_cursor_with_pulled_rows() {
+        let mut s = screen(10, 2);
+        feed(&mut s, b"a\r\nb\r\nc");
+        assert_eq!(s.cursor().row, 1);
+        s.resize(10, 4);
+        assert_eq!(s.cursor().row, 2);
+        let rows: Vec<String> = (0..4).map(|r| s.row_text(r)).collect();
+        assert_eq!(rows, ["a", "b", "c", ""]);
     }
 }
