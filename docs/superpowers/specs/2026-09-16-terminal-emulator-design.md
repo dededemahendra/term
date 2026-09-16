@@ -91,7 +91,8 @@ are no callbacks from Rust into Swift.
 - `term_selection_text(*Term, *mut u8, len) -> written_len` UTF-8.
 - `term_responses(*Term, *mut u8, len) -> written_len` bytes the terminal
   must write back to the shell (cursor position reports, device
-  attributes, focus events, mouse reports).
+  attributes). Mouse and focus reports originate in the shell, which
+  encodes them itself using the modes the core exposes.
 - `term_colors(*Term, *mut Rgb, len) -> status` the overflow colour table
   referenced by cell colour indices.
 
@@ -125,8 +126,9 @@ packed 64-bit value:
 
 Colour indices 0 to 255 are the xterm palette. Indices above 255 point
 into an overflow table of RGB values, populated when an SGR sets a 24-bit
-colour not already in the table. The table is bounded (65,280 entries)
-and reset when the grid is cleared. Fixed width packed cells mean row
+colour not already in the table. Index 0xFFFF is reserved as the
+default colour marker, so the table holds 65,279 entries. It is never
+evicted during a session. Fixed width packed cells mean row
 copies are memcpy and the renderer reads them with no conversion.
 
 Wide glyphs occupy two cells. The second is marked as a spacer. Width
