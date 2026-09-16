@@ -43,6 +43,9 @@ the platform shell is macOS specific.
 - Shell integration, prompt markers, command history UI.
 - Search in scrollback.
 - Grapheme clustering beyond basic emoji sequences.
+- Legacy character sets (DEC special graphics via ESC ( 0, SO and SI).
+  The core is UTF-8 only; the programs named above draw boxes with
+  Unicode under a UTF-8 locale.
 - Config hot reload.
 - Software rendering fallback.
 
@@ -122,7 +125,8 @@ packed 64-bit value:
 | 8 | flags: bold, italic, underline, strike, inverse, wide, wide spacer, dim |
 | 16 | foreground colour index |
 | 16 | background colour index |
-| 3 | reserved |
+| 1 | selected (set only on copies handed to the renderer) |
+| 2 | reserved |
 
 Colour indices 0 to 255 are the xterm palette. Indices above 255 point
 into an overflow table of RGB values, populated when an SGR sets a 24-bit
