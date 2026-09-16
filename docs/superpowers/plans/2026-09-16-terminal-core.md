@@ -4664,3 +4664,27 @@ git commit -m "bench: add core feed throughput benchmark"
 - `bench/results.md` has a first row.
 
 The next plan builds the macOS shell against `core/include/termcore.h`.
+
+## Post-review fixes
+
+A whole-branch review after Task 16 found issues in code this plan
+specified. They were fixed in one commit (`fix(core): close the final
+review findings`) rather than by editing the task text above:
+
+- `Grid::scroll_up_full` is closed form; a 65,535 row scroll no longer
+  loops per row. `scroll_up_region` checks `n == 0` first.
+- SGR 58 and 59 consume their arguments instead of misreading them.
+- CHT and CBT are capped at one screen width; the DECSTBM default row
+  count is clamped to `u16`.
+- `CSI 3 J` clears scrollback only.
+- `pending_zwj` and `just_printed` are cleared across CSI, ESC and OSC.
+- The response buffer is capped at 64 KB.
+- `Screen` carries a generation counter bumped by RIS; `Term::feed`
+  drops the selection when the active screen or generation changes.
+- `term_new` clamps scrollback to `TERM_MAX_SCROLLBACK`; the header
+  documents buffer sizing, error conditions and the call-twice getters.
+- Two ABI tests cover the scrolled-back viewport.
+
+Open spec items carried to the next plan: CI fuzz runs (no remote yet),
+real-program compat recordings (record through the shell), an attribute
+plane for snapshots, and core hot-path profiling.
