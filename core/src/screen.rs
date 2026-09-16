@@ -18,6 +18,14 @@ pub struct Cursor {
     pub pending_wrap: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SavedCursor {
+    col: usize,
+    row: usize,
+    template: Cell,
+    origin: bool,
+}
+
 /// Mode flags the shell needs. `#[repr(C)]` with one-byte fields only,
 /// so it crosses the C ABI unchanged.
 #[repr(C)]
@@ -109,6 +117,9 @@ pub struct Screen {
     responses: Vec<u8>,
     last_char: Option<char>,
     colors: ColorTable,
+    saved_primary: Option<SavedCursor>,
+    saved_alt: Option<SavedCursor>,
+    title: String,
 }
 
 impl Screen {
@@ -127,6 +138,9 @@ impl Screen {
             responses: Vec::new(),
             last_char: None,
             colors: ColorTable::new(),
+            saved_primary: None,
+            saved_alt: None,
+            title: String::new(),
         }
     }
 
@@ -605,6 +619,130 @@ impl Screen {
             }
         }
     }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn set_modes(&mut self, params: &Params, intermediates: &[u8], enable: bool) {
+        let private = intermediates == b"?";
+        for p in params.iter() {
+            let mode = p[0];
+            if private {
+                self.set_private_mode(mode, enable);
+            } else if mode == 4 {
+                self.modes.insert = enable;
+            }
+        }
+    }
+
+    fn set_private_mode(&mut self, mode: u16, enable: bool) {
+        match mode {
+            1 => self.modes.app_cursor = enable,
+            6 => {
+                self.modes.origin = enable;
+                self.move_cursor_to(0, 0);
+            }
+            7 => self.modes.autowrap = enable,
+            9 => self.modes.mouse = if enable { 1 } else { 0 },
+            12 => self.modes.cursor_blink = enable,
+            25 => self.modes.cursor_visible = enable,
+            47 | 1047 => self.switch_alt(enable, false),
+            1000 => self.modes.mouse = if enable { 2 } else { 0 },
+            1002 => self.modes.mouse = if enable { 3 } else { 0 },
+            1003 => self.modes.mouse = if enable { 4 } else { 0 },
+            1004 => self.modes.focus_events = enable,
+            1006 => self.modes.mouse_sgr = enable,
+            1049 => self.switch_alt(enable, true),
+            2004 => self.modes.bracketed_paste = enable,
+            _ => {}
+        }
+    }
+
+    /// Switches between primary and alternate screen. The alternate
+    /// screen is cleared on entry. With `with_cursor` (mode 1049) the
+    /// cursor and attributes are saved on entry and restored on exit.
+    fn switch_alt(&mut self, to_alt: bool, with_cursor: bool) {
+        if to_alt == self.modes.alt_screen {
+            return;
+        }
+        if to_alt {
+            if with_cursor {
+                self.save_cursor();
+            }
+            self.modes.alt_screen = true;
+            let blank = self.blank();
+            for r in 0..self.rows() {
+                self.alt.row_mut(r).clear(blank);
+            }
+        } else {
+            self.modes.alt_screen = false;
+            if with_cursor {
+                self.restore_cursor();
+            }
+            self.primary.mark_all_dirty();
+        }
+        self.cursor.pending_wrap = false;
+    }
+
+    fn save_cursor(&mut self) {
+        let saved = SavedCursor {
+            col: self.cursor.col,
+            row: self.cursor.row,
+            template: self.template,
+            origin: self.modes.origin,
+        };
+        if self.modes.alt_screen {
+            self.saved_alt = Some(saved);
+        } else {
+            self.saved_primary = Some(saved);
+        }
+    }
+
+    fn restore_cursor(&mut self) {
+        let saved = if self.modes.alt_screen { self.saved_alt } else { self.saved_primary };
+        match saved {
+            Some(s) => {
+                self.template = s.template;
+                self.modes.origin = s.origin;
+                self.cursor.row = s.row.min(self.rows() - 1);
+                self.cursor.col = s.col.min(self.cols() - 1);
+                self.cursor.pending_wrap = false;
+            }
+            None => {
+                self.template = Cell::default();
+                self.modes.origin = false;
+                self.move_cursor_to(0, 0);
+            }
+        }
+    }
+
+    fn reverse_index(&mut self) {
+        self.cursor.pending_wrap = false;
+        if self.cursor.row == self.scroll_top {
+            let (top, bottom, blank) = (self.scroll_top, self.scroll_bottom, self.blank());
+            self.grid_mut().scroll_down_region(top, bottom, 1, blank);
+        } else if self.cursor.row > 0 {
+            self.cursor.row -= 1;
+        }
+    }
+
+    /// RIS: back to a freshly created screen of the same size.
+    fn reset(&mut self) {
+        let (cols, rows, scrollback) = (self.cols(), self.rows(), self.primary.scrollback_capacity());
+        *self = Screen::new(cols, rows, scrollback);
+    }
+
+    /// DECALN: fill the screen with E, reset margins, home the cursor.
+    fn screen_alignment(&mut self) {
+        let cell = Cell::default().with_codepoint('E');
+        for r in 0..self.rows() {
+            self.grid_mut().row_mut(r).clear(cell);
+        }
+        self.scroll_top = 0;
+        self.scroll_bottom = self.rows() - 1;
+        self.move_cursor_to(0, 0);
+    }
 }
 
 impl Perform for Screen {
@@ -699,7 +837,42 @@ impl Perform for Screen {
             (b">", 'c') => self.report("\x1b[>0;0;0c"),
             (b" ", 'q') => self.set_cursor_style(param0(params, 0)),
             (b"", 'm') => self.sgr(params),
+            (b"", 'h') | (b"?", 'h') => self.set_modes(params, intermediates, true),
+            (b"", 'l') | (b"?", 'l') => self.set_modes(params, intermediates, false),
+            (b"", 's') => self.save_cursor(),
+            (b"", 'u') => self.restore_cursor(),
             _ => {}
+        }
+    }
+
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        match (intermediates, byte) {
+            (b"", b'7') => self.save_cursor(),
+            (b"", b'8') => self.restore_cursor(),
+            (b"", b'D') => self.linefeed(),
+            (b"", b'E') => {
+                self.carriage_return();
+                self.linefeed();
+            }
+            (b"", b'H') => {
+                let c = self.cursor.col;
+                self.tabs[c] = true;
+            }
+            (b"", b'M') => self.reverse_index(),
+            (b"", b'c') => self.reset(),
+            (b"", b'=') => self.modes.app_keypad = true,
+            (b"", b'>') => self.modes.app_keypad = false,
+            (b"#", b'8') => self.screen_alignment(),
+            _ => {}
+        }
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if let [kind, text, ..] = params {
+            let kind: &[u8] = kind;
+            if kind == b"0" || kind == b"2" {
+                self.title = String::from_utf8_lossy(text).into_owned();
+            }
         }
     }
 }
@@ -1109,5 +1282,178 @@ mod tests {
         feed(&mut s, b"\x1b[38;2;1mX\x1b[38;5mY");
         assert_eq!(s.grid().cell(0, 0).fg(), crate::cell::DEFAULT_COLOR);
         assert_eq!(s.grid().cell(1, 0).fg(), crate::cell::DEFAULT_COLOR);
+    }
+
+    #[test]
+    fn decset_and_decrst_flip_modes() {
+        let mut s = screen(10, 2);
+        feed(&mut s, b"\x1b[?1h\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?25l\x1b[?7l\x1b[4h\x1b[?12h");
+        let m = s.modes();
+        assert!(m.app_cursor && m.bracketed_paste && m.mouse_sgr && m.focus_events && m.insert && m.cursor_blink);
+        assert!(!m.cursor_visible && !m.autowrap);
+        assert_eq!(m.mouse, 2);
+        feed(&mut s, b"\x1b[?1002h");
+        assert_eq!(s.modes().mouse, 3);
+        feed(&mut s, b"\x1b[?1003h");
+        assert_eq!(s.modes().mouse, 4);
+        feed(&mut s, b"\x1b[?9h");
+        assert_eq!(s.modes().mouse, 1);
+        feed(&mut s, b"\x1b[?1000l\x1b[?25h\x1b[4l");
+        assert_eq!(s.modes().mouse, 0);
+        assert!(s.modes().cursor_visible && !s.modes().insert);
+    }
+
+    #[test]
+    fn autowrap_off_overwrites_last_column() {
+        let mut s = screen(3, 2);
+        feed(&mut s, b"\x1b[?7labcdXY");
+        assert_eq!(s.row_text(0), "abY");
+        assert_eq!(s.cursor().row, 0);
+    }
+
+    #[test]
+    fn insert_mode_shifts_right() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"abc\x1b[1G\x1b[4hX");
+        assert_eq!(s.row_text(0), "Xabc");
+    }
+
+    #[test]
+    fn alt_screen_1049_saves_and_restores() {
+        let mut s = screen(10, 2);
+        feed(&mut s, b"hello\x1b[?1049h");
+        assert!(s.modes().alt_screen);
+        assert_eq!(s.row_text(0), "");
+        feed(&mut s, b"world");
+        assert_eq!(s.row_text(0), "     world");
+        feed(&mut s, b"\x1b[?1049l");
+        assert!(!s.modes().alt_screen);
+        assert_eq!(s.row_text(0), "hello");
+        assert_eq!(s.cursor().col, 5);
+    }
+
+    #[test]
+    fn alt_screen_47_keeps_cursor_where_it_is() {
+        let mut s = screen(10, 2);
+        feed(&mut s, b"ab\x1b[?47h");
+        assert_eq!(s.cursor().col, 2);
+        feed(&mut s, b"\x1b[?47l");
+        assert_eq!(s.cursor().col, 2);
+        assert_eq!(s.row_text(0), "ab");
+    }
+
+    #[test]
+    fn alt_screen_has_no_scrollback() {
+        let mut s = screen(10, 2);
+        feed(&mut s, b"\x1b[?1049h\n\n\n\n");
+        assert_eq!(s.grid().scrollback_len(), 0);
+    }
+
+    #[test]
+    fn save_and_restore_cursor_with_attributes() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[1m\x1b[3;3H\x1b7\x1b[m\x1b[H\x1b8X");
+        let c = s.grid().cell(2, 2);
+        assert_eq!(c.codepoint(), 'X');
+        assert_eq!(c.flags(), flags::BOLD);
+        feed(&mut s, b"\x1b[2;2H\x1b[s\x1b[H\x1b[uY");
+        assert_eq!(s.grid().cell(1, 1).codepoint(), 'Y');
+    }
+
+    #[test]
+    fn restore_without_save_goes_home() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[3;3H\x1b8");
+        assert_eq!((s.cursor().col, s.cursor().row), (0, 0));
+    }
+
+    #[test]
+    fn reverse_index_scrolls_down_at_top() {
+        let mut s = screen(5, 3);
+        feed(&mut s, b"a\r\nb\x1bM\x1bM");
+        let rows: Vec<String> = (0..3).map(|r| s.row_text(r)).collect();
+        assert_eq!(rows, ["", "a", "b"]);
+        assert_eq!(s.cursor().row, 0);
+    }
+
+    #[test]
+    fn nel_and_ind() {
+        let mut s = screen(5, 3);
+        feed(&mut s, b"ab\x1bEc\x1bD");
+        assert_eq!(s.row_text(1), "c");
+        assert_eq!((s.cursor().col, s.cursor().row), (1, 2));
+    }
+
+    #[test]
+    fn hts_sets_a_tab_stop() {
+        let mut s = screen(20, 1);
+        feed(&mut s, b"\x1b[3G\x1bH\x1b[G\tx");
+        assert_eq!(s.row_text(0), "  x");
+    }
+
+    #[test]
+    fn ris_resets_everything() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"xy\x1b[1m\x1b[?1049h\x1b[5;5Hab\x1bc");
+        assert!(!s.modes().alt_screen);
+        assert_eq!((s.cursor().col, s.cursor().row), (0, 0));
+        assert_eq!(s.template().flags(), 0);
+        assert_eq!(s.row_text(0), "");
+        assert_eq!(s.grid().scrollback_capacity(), 10);
+    }
+
+    #[test]
+    fn osc_sets_title() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b]0;My title\x07");
+        assert_eq!(s.title(), "My title");
+        feed(&mut s, b"\x1b]2;Other\x1b\\");
+        assert_eq!(s.title(), "Other");
+        feed(&mut s, b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(s.title(), "Other");
+    }
+
+    #[test]
+    fn decaln_fills_with_e() {
+        let mut s = screen(3, 2);
+        feed(&mut s, b"\x1b#8");
+        assert_eq!(s.row_text(0), "EEE");
+        assert_eq!(s.row_text(1), "EEE");
+    }
+
+    #[test]
+    fn keypad_modes() {
+        let mut s = screen(3, 2);
+        feed(&mut s, b"\x1b=");
+        assert!(s.modes().app_keypad);
+        feed(&mut s, b"\x1b>");
+        assert!(!s.modes().app_keypad);
+    }
+
+    #[test]
+    fn origin_mode_confines_cursor_and_reports_relative() {
+        let mut s = screen(10, 5);
+        feed(&mut s, b"\x1b[2;4r\x1b[?6h\x1b[H");
+        assert_eq!(s.cursor().row, 1);
+        feed(&mut s, b"\x1b[99;1H");
+        assert_eq!(s.cursor().row, 3);
+        feed(&mut s, b"\x1b[6n");
+        let mut out = [0u8; 16];
+        let n = s.take_responses(&mut out);
+        assert_eq!(&out[..n], b"\x1b[3;1R");
+    }
+
+    #[test]
+    fn dcs_is_ignored() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1bPq#0;2;0;0;0\x1b\\X");
+        assert_eq!(s.row_text(0), "X");
+    }
+
+    #[test]
+    fn charset_designation_is_ignored() {
+        let mut s = screen(10, 1);
+        feed(&mut s, b"\x1b(B\x1b)0X");
+        assert_eq!(s.row_text(0), "X");
     }
 }
