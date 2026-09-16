@@ -4402,7 +4402,7 @@ Expected: `7`.
 Run: `UPDATE_SNAPSHOTS=1 cargo test -p termcore --test compat`
 Expected: 1 passed, and seven `.snap` files appear.
 
-Each `.snap` has 24 lines (23 newlines, no trailing newline). Open each and check the non-empty lines against this table. Lines not listed must be empty.
+Each `.snap` is the 24 screen rows joined by newlines, so it holds 23 newline characters; when row 24 is blank the file therefore ends with a newline byte, and when row 24 has text it does not. Open each and check the non-empty lines against this table. Lines not listed must be empty.
 
 | fixture | line | expected text |
 |---|---|---|
