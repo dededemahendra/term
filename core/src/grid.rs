@@ -205,6 +205,116 @@ impl Grid {
     pub fn screen_line_id(&self, r: usize) -> u64 {
         self.dropped + self.screen_live(r) as u64
     }
+
+    /// Scrolls rows `top..=bottom` up by `n`. Rows leaving the top of a
+    /// partial region are lost; a full screen region uses scrollback.
+    pub fn scroll_up_region(&mut self, top: usize, bottom: usize, n: usize, template: Cell) {
+        if top == 0 && bottom == self.rows - 1 {
+            return self.scroll_up_full(n, template);
+        }
+        if top > bottom || bottom >= self.rows || n == 0 {
+            return;
+        }
+        let n = n.min(bottom - top + 1);
+        for r in top..(bottom + 1 - n) {
+            let a = self.storage_index(self.screen_live(r));
+            let b = self.storage_index(self.screen_live(r + n));
+            self.storage.swap(a, b);
+        }
+        for r in (bottom + 1 - n)..=bottom {
+            let i = self.storage_index(self.screen_live(r));
+            self.storage[i].clear(template);
+        }
+        for r in top..=bottom {
+            self.mark_dirty(r);
+        }
+    }
+
+    /// Scrolls rows `top..=bottom` down by `n`. Rows leaving the bottom
+    /// are lost; `n` cleared rows enter at `top`.
+    pub fn scroll_down_region(&mut self, top: usize, bottom: usize, n: usize, template: Cell) {
+        if top > bottom || bottom >= self.rows || n == 0 {
+            return;
+        }
+        let n = n.min(bottom - top + 1);
+        for r in ((top + n)..=bottom).rev() {
+            let a = self.storage_index(self.screen_live(r));
+            let b = self.storage_index(self.screen_live(r - n));
+            self.storage.swap(a, b);
+        }
+        for r in top..(top + n) {
+            let i = self.storage_index(self.screen_live(r));
+            self.storage[i].clear(template);
+        }
+        for r in top..=bottom {
+            self.mark_dirty(r);
+        }
+    }
+
+    /// Drops every scrollback row. The screen is untouched.
+    pub fn clear_scrollback(&mut self) {
+        let extra = self.scrollback_len();
+        self.start = (self.start + extra) % self.capacity();
+        self.dropped += extra as u64;
+        self.len = self.rows;
+        self.viewport = 0;
+        self.mark_all_dirty();
+    }
+
+    pub fn viewport(&self) -> usize {
+        self.viewport
+    }
+
+    /// Moves the viewport by `delta` rows. Positive is towards older
+    /// content. Clamped to the available scrollback.
+    pub fn scroll_viewport(&mut self, delta: i32) {
+        let max = self.scrollback_len() as i64;
+        let next = (self.viewport as i64 + delta as i64).clamp(0, max) as usize;
+        if next != self.viewport {
+            self.viewport = next;
+            self.mark_all_dirty();
+        }
+    }
+
+    fn visible_live(&self, r: usize) -> usize {
+        self.len - self.rows - self.viewport + r
+    }
+
+    /// Row `r` as the user currently sees it, viewport applied.
+    pub fn visible_row(&self, r: usize) -> &Row {
+        &self.storage[self.storage_index(self.visible_live(r))]
+    }
+
+    pub fn visible_line_id(&self, r: usize) -> u64 {
+        self.dropped + self.visible_live(r) as u64
+    }
+
+    /// Changes the grid size. No reflow. Shrinking pushes top rows into
+    /// scrollback; growing pulls them back, then pads with blank rows.
+    pub fn resize(&mut self, cols: usize, rows: usize, template: Cell) {
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        // Linearise the ring so live rows are storage[0..len].
+        self.storage.rotate_left(self.start);
+        self.start = 0;
+        for row in &mut self.storage {
+            row.resize(cols, template);
+        }
+        self.cols = cols;
+        let want_capacity = rows + self.scrollback;
+        while self.storage.len() < want_capacity {
+            self.storage.push(Row::new(cols));
+        }
+        while self.len < rows {
+            self.storage[self.len].clear(template);
+            self.len += 1;
+        }
+        let keep = want_capacity.max(self.len);
+        self.storage.truncate(keep);
+        self.rows = rows;
+        self.viewport = self.viewport.min(self.scrollback_len());
+        self.dirty = vec![u64::MAX; rows.div_ceil(64)];
+    }
 }
 
 #[cfg(test)]
@@ -299,5 +409,131 @@ mod tests {
     fn dirty_words_covers_all_rows() {
         let g = Grid::new(1, 130, 0);
         assert_eq!(g.dirty_words(), 3);
+    }
+
+    fn filled(cols: usize, rows: usize, scrollback: usize) -> Grid {
+        let mut g = Grid::new(cols, rows, scrollback);
+        for r in 0..rows {
+            g.set_cell(0, r, ch((b'0' + r as u8) as char));
+        }
+        g
+    }
+
+    #[test]
+    fn region_scroll_up_only_touches_the_region() {
+        let mut g = filled(1, 5, 5);
+        g.scroll_up_region(1, 3, 1, Cell::default());
+        let rows: Vec<String> = (0..5).map(|r| row_text(&g, r)).collect();
+        assert_eq!(rows, ["0", "2", "3", "", "4"]);
+        assert_eq!(g.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn region_scroll_down_only_touches_the_region() {
+        let mut g = filled(1, 5, 5);
+        g.scroll_down_region(1, 3, 2, Cell::default());
+        let rows: Vec<String> = (0..5).map(|r| row_text(&g, r)).collect();
+        assert_eq!(rows, ["0", "", "", "1", "4"]);
+    }
+
+    #[test]
+    fn region_scroll_by_region_size_clears_it() {
+        let mut g = filled(1, 3, 0);
+        g.scroll_up_region(0, 1, 5, Cell::default());
+        let rows: Vec<String> = (0..3).map(|r| row_text(&g, r)).collect();
+        assert_eq!(rows, ["", "", "2"]);
+    }
+
+    #[test]
+    fn full_region_scroll_uses_scrollback() {
+        let mut g = filled(1, 3, 5);
+        g.scroll_up_region(0, 2, 1, Cell::default());
+        assert_eq!(g.scrollback_len(), 1);
+        assert_eq!(row_text(&g, 0), "1");
+    }
+
+    #[test]
+    fn viewport_scrolls_into_history_and_clamps() {
+        let mut g = filled(1, 2, 3);
+        g.scroll_up_full(2, Cell::default());
+        assert_eq!(g.scrollback_len(), 2);
+        g.scroll_viewport(1);
+        assert_eq!(g.viewport(), 1);
+        assert_eq!(g.visible_row(0).cells()[0].codepoint(), '1');
+        assert_eq!(g.visible_line_id(0), 1);
+        g.scroll_viewport(50);
+        assert_eq!(g.viewport(), 2);
+        assert_eq!(g.visible_row(0).cells()[0].codepoint(), '0');
+        g.scroll_viewport(-50);
+        assert_eq!(g.viewport(), 0);
+        assert_eq!(g.visible_row(0).cells()[0].codepoint(), ' ');
+    }
+
+    #[test]
+    fn new_output_keeps_viewport_anchored() {
+        let mut g = filled(1, 2, 5);
+        g.scroll_up_full(1, Cell::default());
+        g.scroll_viewport(1);
+        g.scroll_up_full(1, Cell::default());
+        assert_eq!(g.viewport(), 2);
+        assert_eq!(g.visible_row(0).cells()[0].codepoint(), '0');
+    }
+
+    #[test]
+    fn clear_scrollback_keeps_the_screen() {
+        let mut g = filled(1, 2, 5);
+        g.scroll_up_full(2, Cell::default());
+        g.scroll_viewport(2);
+        g.clear_scrollback();
+        assert_eq!(g.scrollback_len(), 0);
+        assert_eq!(g.viewport(), 0);
+        assert_eq!(g.first_line_id(), 2);
+        assert_eq!(row_text(&g, 0), "");
+    }
+
+    #[test]
+    fn resize_wider_pads_and_narrower_truncates() {
+        let mut g = filled(2, 2, 0);
+        g.set_cell(1, 0, ch('x'));
+        g.resize(4, 2, Cell::default());
+        assert_eq!(g.cols(), 4);
+        assert_eq!(g.row(0).len(), 4);
+        assert_eq!(row_text(&g, 0), "0x");
+        g.resize(1, 2, Cell::default());
+        assert_eq!(row_text(&g, 0), "0");
+    }
+
+    #[test]
+    fn resize_shorter_pushes_top_rows_into_scrollback() {
+        let mut g = filled(1, 4, 10);
+        g.resize(1, 2, Cell::default());
+        assert_eq!(g.rows(), 2);
+        assert_eq!(g.scrollback_len(), 2);
+        assert_eq!(row_text(&g, 0), "2");
+        assert_eq!(g.line(0).unwrap().cells()[0].codepoint(), '0');
+    }
+
+    #[test]
+    fn resize_taller_pulls_scrollback_back_then_pads() {
+        let mut g = filled(1, 2, 10);
+        g.scroll_up_full(1, Cell::default());
+        g.resize(1, 5, Cell::default());
+        assert_eq!(g.rows(), 5);
+        assert_eq!(g.scrollback_len(), 0);
+        let rows: Vec<String> = (0..5).map(|r| row_text(&g, r)).collect();
+        assert_eq!(rows, ["0", "1", "", "", ""]);
+        assert!(g.dirty_words() >= 1 && g.is_dirty(4));
+    }
+
+    #[test]
+    fn resize_after_ring_wrap_preserves_order() {
+        let mut g = Grid::new(1, 2, 2);
+        for c in ['a', 'b', 'c', 'd', 'e'] {
+            g.set_cell(0, 1, ch(c));
+            g.scroll_up_full(1, Cell::default());
+        }
+        g.resize(1, 4, Cell::default());
+        let rows: Vec<String> = (0..4).map(|r| row_text(&g, r)).collect();
+        assert_eq!(rows, ["c", "d", "e", ""]);
     }
 }
