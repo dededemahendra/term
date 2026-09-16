@@ -1062,6 +1062,23 @@ Append inside the existing `mod tests` in `core/src/grid.rs`:
     }
 
     #[test]
+    fn resize_shorter_evicts_rows_beyond_scrollback_cap() {
+        let mut g = Grid::new(1, 2, 2);
+        for i in 0..10u8 {
+            g.set_cell(0, 1, ch((b'a' + i) as char));
+            g.scroll_up_full(1, Cell::default());
+        }
+        assert_eq!(g.scrollback_len(), 2);
+        g.resize(1, 1, Cell::default());
+        assert_eq!(g.rows(), 1);
+        assert_eq!(g.scrollback_len(), 2);
+        assert!(g.scrollback_len() <= g.scrollback_capacity());
+        assert_eq!(g.line_count(), 3);
+        assert_eq!(row_text(&g, 0), "");
+        assert_eq!(g.line(g.first_line_id()).unwrap().cells()[0].codepoint(), 'i');
+    }
+
+    #[test]
     fn resize_after_ring_wrap_preserves_order() {
         let mut g = Grid::new(1, 2, 2);
         for c in ['a', 'b', 'c', 'd', 'e'] {
@@ -1180,6 +1197,13 @@ Add these methods inside `impl Grid` in `core/src/grid.rs`, after `screen_line_i
         }
         self.cols = cols;
         let want_capacity = rows + self.scrollback;
+        // Evict the oldest rows that no longer fit under the scrollback cap.
+        if self.len > want_capacity {
+            let excess = self.len - want_capacity;
+            self.storage.rotate_left(excess);
+            self.len -= excess;
+            self.dropped += excess as u64;
+        }
         while self.storage.len() < want_capacity {
             self.storage.push(Row::new(cols));
         }
@@ -1187,8 +1211,7 @@ Add these methods inside `impl Grid` in `core/src/grid.rs`, after `screen_line_i
             self.storage[self.len].clear(template);
             self.len += 1;
         }
-        let keep = want_capacity.max(self.len);
-        self.storage.truncate(keep);
+        self.storage.truncate(want_capacity);
         self.rows = rows;
         self.viewport = self.viewport.min(self.scrollback_len());
         self.dirty = vec![u64::MAX; rows.div_ceil(64)];
@@ -1198,7 +1221,7 @@ Add these methods inside `impl Grid` in `core/src/grid.rs`, after `screen_line_i
 - [ ] **Step 4: Run to verify pass**
 
 Run: `cargo test -p termcore grid`
-Expected: 18 passed.
+Expected: 19 passed.
 
 - [ ] **Step 5: Commit**
 
