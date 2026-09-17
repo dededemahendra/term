@@ -17,6 +17,8 @@ final class KeyEncoderTests: XCTestCase {
         XCTAssertNil(encode(key("a")))
         XCTAssertNil(encode(key("A", [.shift])))
         XCTAssertNil(encode(key("n", [.command])))
+        XCTAssertNil(encode(key("", code: KeyCode.left, [.command])))
+        XCTAssertNil(encode(key("\r", code: KeyCode.returnKey, [.command])))
     }
 
     func testArrowsNormalAndApplicationMode() {

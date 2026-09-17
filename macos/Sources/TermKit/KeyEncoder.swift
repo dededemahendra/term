@@ -66,6 +66,10 @@ public enum KeyEncoder {
         let modParam = 1 + (m.contains(.shift) ? 1 : 0) + (m.contains(.option) ? 2 : 0) + (m.contains(.control) ? 4 : 0)
         let meta = m.contains(.option) && altIsMeta
 
+        if m.contains(.command) {
+            return nil
+        }
+
         func arrow(_ final: String) -> [UInt8] {
             if modParam > 1 { return Array("\u{1B}[1;\(modParam)\(final)".utf8) }
             return Array((modes.app_cursor ? "\u{1B}O" : "\u{1B}[").utf8) + Array(final.utf8)
@@ -111,9 +115,6 @@ public enum KeyEncoder {
         default: break
         }
 
-        if m.contains(.command) {
-            return nil
-        }
         let base = key.charactersIgnoringModifiers
         if m.contains(.control), let scalar = base.unicodeScalars.first {
             let c = scalar.value
