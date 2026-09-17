@@ -51,4 +51,15 @@ final class PtyTests: XCTestCase {
         let out = try collect(program: "/nonexistent/program", arguments: ["x"])
         XCTAssertEqual(out, "")
     }
+
+    func testCloseAndWriteAfterExitAreIgnored() throws {
+        let pty = try Pty(program: "/bin/echo", arguments: ["echo", "bye"], environment: Pty.childEnvironment(), cols: 10, rows: 2)
+        let done = expectation(description: "exit")
+        pty.startReading(onData: { _ in }, onExit: { done.fulfill() })
+        wait(for: [done], timeout: 5)
+        XCTAssertTrue(pty.hasExited)
+        pty.close()
+        pty.write(Array("ignored".utf8))
+        pty.resize(cols: 5, rows: 5)
+    }
 }

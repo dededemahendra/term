@@ -11,6 +11,22 @@ public final class Pty {
     public let pid: pid_t
     public let masterFd: Int32
     private var reader: Thread?
+    private let stateLock = NSLock()
+    private var exited = false
+
+    /// True once the child has been reaped. Writes, resizes and hangups
+    /// after that are ignored, so a recycled pid or descriptor is never hit.
+    public var hasExited: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return exited
+    }
+
+    private func markExited() {
+        stateLock.lock()
+        exited = true
+        stateLock.unlock()
+    }
 
     /// Spawns `program` with `arguments` (argv[0] included) and `environment`.
     public init(program: String, arguments: [String], environment: [String: String], cols: Int, rows: Int) throws {
@@ -53,7 +69,7 @@ public final class Pty {
     public func startReading(onData: @escaping (UnsafeRawBufferPointer) -> Void, onExit: @escaping () -> Void) {
         let fd = masterFd
         let pid = self.pid
-        let thread = Thread {
+        let thread = Thread { [weak self] in
             var buffer = [UInt8](repeating: 0, count: 64 * 1024)
             while true {
                 let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
@@ -67,6 +83,7 @@ public final class Pty {
             }
             var status: Int32 = 0
             waitpid(pid, &status, 0)
+            self?.markExited()
             _ = Darwin.close(fd)
             onExit()
         }
@@ -78,6 +95,7 @@ public final class Pty {
 
     /// Writes all of `bytes`, retrying on partial writes.
     public func write(_ bytes: [UInt8]) {
+        guard !hasExited else { return }
         bytes.withUnsafeBytes { raw in
             guard var p = raw.baseAddress else { return }
             var left = raw.count
@@ -94,6 +112,7 @@ public final class Pty {
     }
 
     public func resize(cols: Int, rows: Int) {
+        guard !hasExited else { return }
         _ = cpty_resize(masterFd, UInt16(clamping: cols), UInt16(clamping: rows))
     }
 
@@ -101,6 +120,7 @@ public final class Pty {
     /// child's side goes away; closing it here would deadlock against the
     /// blocked read on macOS.
     public func close() {
+        guard !hasExited else { return }
         kill(pid, SIGHUP)
     }
 }
