@@ -3,3 +3,5 @@
 /core/fuzz/corpus
 /core/fuzz/artifacts
 .DS_Store
+/macos/.build
+/macos/build
