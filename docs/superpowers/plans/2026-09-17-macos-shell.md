@@ -1040,12 +1040,14 @@ final class PtyTests: XCTestCase {
         let seen = expectation(description: "echo")
         var output = [UInt8]()
         let lock = NSLock()
+        var fulfilled = false
         pty.startReading(onData: { bytes in
             lock.lock()
             output.append(contentsOf: bytes)
-            let text = String(decoding: output, as: UTF8.self)
+            let hit = !fulfilled && String(decoding: output, as: UTF8.self).contains("ping")
+            if hit { fulfilled = true }
             lock.unlock()
-            if text.contains("ping") { seen.fulfill() }
+            if hit { seen.fulfill() }
         }, onExit: {})
         pty.write(Array("ping\r".utf8))
         wait(for: [seen], timeout: 5)
@@ -1608,7 +1610,7 @@ git commit -m "feat(macos): mouse reporting and cmd-click URL detection"
 
 **Interfaces:**
 - Produces: `GlyphStyle`, `GlyphRect` (8 bytes, matches the shader), `GlyphRef` (`index`, `isColor`), `GlyphAtlas` (`init(device:fontName:pointSize:scale:lineHeight:warn:)`, `cellWidth`, `cellHeight`, `baseline`, `texture`, `rects`, `generation`, `glyph(for:style:wide:)`, `GlyphAtlas.metrics(fontName:pointSize:scale:lineHeight:)`, `GlyphAtlas.resolveFont(name:size:warn:)`).
-- Rules: index 0 is the blank glyph; monochrome glyphs are white with coverage in alpha; colour glyphs are stored as drawn; a two-cell slot holding a narrow text glyph switches to the colour emoji font; the texture starts at 512 pixels and doubles by blitting.
+- Rules: index 0 is the blank glyph; monochrome glyphs are white with coverage in alpha; colour glyphs are stored as drawn; a two-cell slot holding a narrow text glyph switches to the colour emoji font; the texture starts at 512 pixels and doubles by blitting. Growth is capped at `maxTextureSize` (4096 by default) and fallible; once the atlas cannot grow, new glyphs resolve to the blank glyph.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1689,6 +1691,20 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertGreaterThan(atlas.generation, startGeneration)
         XCTAssertEqual(inkedPixels(atlas, atlas.rects[Int(first.index)]), before)
     }
+
+    func testAtlasStopsGrowingAtItsCapAndDrawsBlanks() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let atlas = GlyphAtlas(device: device, fontName: "Menlo", pointSize: 13, scale: 2, lineHeight: 1, maxTextureSize: 512)
+        let first = atlas.glyph(for: "M", style: [], wide: false)
+        var blanks = 0
+        for cp in 0x4E00..<(0x4E00 + 400) where atlas.glyph(for: Unicode.Scalar(cp)!, style: [], wide: true).index == 0 {
+            blanks += 1
+        }
+        XCTAssertEqual(atlas.generation, 0)
+        XCTAssertEqual(atlas.texture.width, 512)
+        XCTAssertGreaterThan(blanks, 0)
+        XCTAssertEqual(atlas.glyph(for: "M", style: [], wide: false).index, first.index, "cached glyphs still resolve")
+    }
 }
 ```
 
@@ -1747,6 +1763,8 @@ public final class GlyphAtlas {
     public let cellHeight: Int
     /// Pixels from the bottom of a cell to the baseline.
     public let baseline: Int
+    /// Largest texture edge the atlas will grow to. Beyond it, new glyphs draw blank.
+    public let maxTextureSize: Int
     public private(set) var texture: MTLTexture
     public private(set) var rects: [GlyphRect] = [GlyphRect(x: 0, y: 0, w: 0, h: 0)]
     /// Bumped whenever `texture` is replaced by a larger one.
@@ -1792,11 +1810,12 @@ public final class GlyphAtlas {
     }
 
     public init(device: MTLDevice, fontName: String, pointSize: CGFloat, scale: CGFloat, lineHeight: CGFloat,
-                warn: (String) -> Void = { _ in }) {
+                warn: (String) -> Void = { _ in }, maxTextureSize: Int = 4096) {
         self.device = device
         self.fontName = fontName
         self.pointSize = pointSize
         self.scale = scale
+        self.maxTextureSize = maxTextureSize
         queue = device.makeCommandQueue()!
         let base = GlyphAtlas.resolveFont(name: fontName, size: pointSize * scale, warn: warn)
         func styled(_ traits: CTFontSymbolicTraits) -> CTFont {
@@ -1812,15 +1831,19 @@ public final class GlyphAtlas {
         cellWidth = m.cellWidth
         cellHeight = m.cellHeight
         baseline = m.baseline
-        texture = GlyphAtlas.makeTexture(device: device, size: 512)
+        guard let initial = GlyphAtlas.makeTexture(device: device, size: 512) else {
+            // A 1 MB allocation failing at startup means Metal itself is unusable.
+            preconditionFailure("Metal could not allocate the glyph atlas")
+        }
+        texture = initial
     }
 
-    private static func makeTexture(device: MTLDevice, size: Int) -> MTLTexture {
+    private static func makeTexture(device: MTLDevice, size: Int) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
         descriptor.usage = [.shaderRead]
         descriptor.storageMode = .shared
-        let texture = device.makeTexture(descriptor: descriptor)!
-        texture.label = "glyph atlas \(size)"
+        let texture = device.makeTexture(descriptor: descriptor)
+        texture?.label = "glyph atlas \(size)"
         return texture
     }
 
@@ -1892,7 +1915,9 @@ public final class GlyphAtlas {
             var position = CGPoint(x: max(0, (CGFloat(slotWidth) - advance.width) / 2), y: CGFloat(baseline))
             CTFontDrawGlyphs(font, &glyph, &position, 1, ctx)
         }
-        let rect = place(width: width, height: height)
+        guard let rect = place(width: width, height: height) else {
+            return GlyphRef(index: 0, isColor: false)
+        }
         pixels.withUnsafeBytes { raw in
             texture.replace(region: MTLRegionMake2D(Int(rect.x), Int(rect.y), width, height), mipmapLevel: 0,
                             withBytes: raw.baseAddress!, bytesPerRow: width * 4)
@@ -1902,13 +1927,14 @@ public final class GlyphAtlas {
     }
 
     /// Reserves a slot, moving to the next shelf or growing the texture.
-    private func place(width: Int, height: Int) -> GlyphRect {
+    /// Nil when the atlas has reached its cap or the GPU refused to grow it.
+    private func place(width: Int, height: Int) -> GlyphRect? {
         if cursorX + width > texture.width {
             cursorX = 0
             cursorY += height
         }
-        while cursorY + height > texture.height {
-            grow()
+        while cursorY + height > texture.height || width > texture.width {
+            if !grow() { return nil }
         }
         let rect = GlyphRect(x: UInt16(cursorX), y: UInt16(cursorY), w: UInt16(width), h: UInt16(height))
         cursorX += width
@@ -1916,10 +1942,12 @@ public final class GlyphAtlas {
     }
 
     /// Doubles the texture, copying existing glyphs into the top left.
-    private func grow() {
-        let bigger = GlyphAtlas.makeTexture(device: device, size: texture.width * 2)
-        let commands = queue.makeCommandBuffer()!
-        let blit = commands.makeBlitCommandEncoder()!
+    /// False when the cap is reached or an allocation fails.
+    private func grow() -> Bool {
+        guard texture.width < maxTextureSize,
+              let bigger = GlyphAtlas.makeTexture(device: device, size: texture.width * 2),
+              let commands = queue.makeCommandBuffer(),
+              let blit = commands.makeBlitCommandEncoder() else { return false }
         blit.copy(from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
                   to: bigger, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
@@ -1928,6 +1956,7 @@ public final class GlyphAtlas {
         commands.waitUntilCompleted()
         texture = bigger
         generation += 1
+        return true
     }
 }
 ```
@@ -1935,7 +1964,7 @@ public final class GlyphAtlas {
 - [ ] **Step 4: Run to verify pass**
 
 Run: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter GlyphAtlasTests` from `macos/`
-Expected: 5 tests, 0 failures (the growth test takes a few hundred milliseconds).
+Expected: 6 tests, 0 failures (the growth test takes a few hundred milliseconds).
 
 - [ ] **Step 5: Commit**
 
@@ -3110,7 +3139,7 @@ public final class TerminalView: NSView, NSTextInputClient {
 - [ ] **Step 3: Build and run the whole suite**
 
 Run: `swift build` from `macos/`, then `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` from `macos/`
-Expected: no warnings; 39 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
+Expected: no warnings; 40 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
 
 - [ ] **Step 4: Commit**
 
@@ -3642,7 +3671,7 @@ git commit -m "build(macos): universal release script and cask template"
 
 ## Done criteria for this plan
 
-- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 39 tests.
+- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 40 tests.
 - `macos/scripts/run.sh` opens a working terminal: a login shell, colours, wide glyphs, emoji, selection, copy and paste, scrollback with the wheel, cmd-click URLs, font zoom, new window, full screen.
 - `bench-shell/results.md` has a measured row for the built app.
 - `scripts/release.sh` produces a universal dmg without credentials.
