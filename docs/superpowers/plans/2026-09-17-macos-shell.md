@@ -664,6 +664,14 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(warnings[4].contains("expected key = value"))
     }
 
+    func testHexValueWithTrailingComment() {
+        var warnings: [String] = []
+        let c = Config.parse("foreground = #ffffff # note\nbackground=#000000#dark\n", warn: { warnings.append($0) })
+        XCTAssertEqual(warnings, [])
+        XCTAssertEqual(c.foreground, RGB(255, 255, 255))
+        XCTAssertEqual(c.background, RGB(0, 0, 0))
+    }
+
     func testMissingFileGivesDefaults() {
         XCTAssertEqual(Config.load(path: "/nonexistent/term/config"), Config())
     }
@@ -756,15 +764,20 @@ public struct Config: Equatable {
     public static func parse(_ text: String, warn: (String) -> Void = { _ in }) -> Config {
         var config = Config()
         for (index, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            let line = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
-                .trimmingCharacters(in: .whitespaces)
-            if line.isEmpty { continue }
-            guard let eq = line.firstIndex(of: "=") else {
+            let trimmedLine = rawLine.trimmingCharacters(in: .whitespaces)
+            if trimmedLine.isEmpty || trimmedLine.hasPrefix("#") { continue }
+            guard let eq = trimmedLine.firstIndex(of: "=") else {
                 warn("config line \(index + 1): expected key = value")
                 continue
             }
-            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
-            let value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            let key = trimmedLine[..<eq].trimmingCharacters(in: .whitespaces)
+            var value = trimmedLine[trimmedLine.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            // A "#" starts a trailing comment, but a leading "#" is the value's own
+            // (hex colours are written "#rrggbb"), so skip past it before searching.
+            let searchStart = value.hasPrefix("#") ? value.index(after: value.startIndex) : value.startIndex
+            if let hashIndex = value[searchStart...].firstIndex(of: "#") {
+                value = value[..<hashIndex].trimmingCharacters(in: .whitespaces)
+            }
             if !config.apply(key: key, value: value) {
                 warn("config line \(index + 1): ignored \(key) = \(value)")
             }
@@ -838,7 +851,7 @@ public struct Config: Equatable {
 - [ ] **Step 4: Run to verify pass**
 
 Run: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter ConfigTests` from `macos/`
-Expected: 5 tests, 0 failures.
+Expected: 6 tests, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -3085,7 +3098,7 @@ public final class TerminalView: NSView, NSTextInputClient {
 - [ ] **Step 3: Build and run the whole suite**
 
 Run: `swift build` from `macos/`, then `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` from `macos/`
-Expected: no warnings; 37 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
+Expected: no warnings; 38 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
 
 - [ ] **Step 4: Commit**
 
@@ -3617,7 +3630,7 @@ git commit -m "build(macos): universal release script and cask template"
 
 ## Done criteria for this plan
 
-- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 37 tests.
+- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 38 tests.
 - `macos/scripts/run.sh` opens a working terminal: a login shell, colours, wide glyphs, emoji, selection, copy and paste, scrollback with the wheel, cmd-click URLs, font zoom, new window, full screen.
 - `bench-shell/results.md` has a measured row for the built app.
 - `scripts/release.sh` produces a universal dmg without credentials.
