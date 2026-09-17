@@ -23,6 +23,7 @@ public final class LatencyProbe {
     }
 
     public func keyDown(at timestamp: TimeInterval) {
+        guard LatencyProbe.enabled else { return }
         lock.lock()
         if pendingKey == nil { pendingKey = timestamp }
         lock.unlock()
@@ -38,7 +39,7 @@ public final class LatencyProbe {
 
     public func framePresented(at time: TimeInterval) {
         lock.lock()
-        if !reportedStartup {
+        if !reportedStartup, LatencyProbe.enabled {
             reportedStartup = true
             let start = cpty_process_start_uptime()
             if start > 0 {
