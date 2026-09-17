@@ -46,10 +46,10 @@ final class PtyTests: XCTestCase {
         pty.close()
     }
 
-    func testMissingProgramExitsWithoutOutput() throws {
-        // forkpty succeeds and exec fails in the child, which exits 127.
-        let out = try collect(program: "/nonexistent/program", arguments: ["x"])
-        XCTAssertEqual(out, "")
+    func testMissingProgramThrowsSpawnFailed() {
+        XCTAssertThrowsError(try Pty(program: "/nonexistent/program", arguments: ["x"], environment: [:], cols: 1, rows: 1)) { error in
+            XCTAssertEqual(error as? PtyError, .spawnFailed(errno: ENOENT))
+        }
     }
 
     /// The guards in write, resize and close are trivial by inspection; this

@@ -28,7 +28,17 @@ public final class TerminalSession {
             program = config.shell ?? Pty.loginShell
             arguments = ["-" + (program as NSString).lastPathComponent]
         }
-        pty = try Pty(program: program, arguments: arguments, environment: Pty.childEnvironment(), cols: cols, rows: rows)
+        let environment = Pty.childEnvironment()
+        do {
+            pty = try Pty(program: program, arguments: arguments, environment: environment, cols: cols, rows: rows)
+        } catch PtyError.spawnFailed(let code) {
+            // The window still opens: a shell prints the failure into the grid
+            // and exits on the next key, as the spec asks.
+            let message = "term: could not start \(program): \(String(cString: strerror(code))). Press any key to close."
+            let script = "printf '%s\\r\\n' \"$0\"; stty raw -echo 2>/dev/null; dd bs=1 count=1 >/dev/null 2>&1"
+            pty = try Pty(program: "/bin/sh", arguments: ["sh", "-c", script, message], environment: environment,
+                          cols: cols, rows: rows)
+        }
         LatencyProbe.mark("shell spawned")
     }
 
@@ -64,15 +74,15 @@ public final class TerminalSession {
         pty.write(Array(text.utf8))
     }
 
-    /// Pastes text: newlines become carriage returns, and bracketed paste
-    /// markers wrap it when the program asked for them.
-    public func paste(_ text: String) {
+    /// Bytes to send for a paste: newlines become carriage returns, and
+    /// bracketed paste markers wrap the text when the program asked for them.
+    public static func pasteText(_ text: String, bracketed: Bool) -> String {
         let normalised = text.replacingOccurrences(of: "\r\n", with: "\r").replacingOccurrences(of: "\n", with: "\r")
-        if terminal.modes.bracketed_paste {
-            write("\u{1B}[200~" + normalised + "\u{1B}[201~")
-        } else {
-            write(normalised)
-        }
+        return bracketed ? "\u{1B}[200~" + normalised + "\u{1B}[201~" : normalised
+    }
+
+    public func paste(_ text: String) {
+        write(TerminalSession.pasteText(text, bracketed: terminal.modes.bracketed_paste))
     }
 
     public func resize(cols: Int, rows: Int) {

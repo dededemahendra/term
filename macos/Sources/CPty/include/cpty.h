@@ -4,7 +4,8 @@
 #include <sys/types.h>
 
 /* Forks a child on a new pseudo terminal of the given size and execs
- * path with argv and envp. Returns the master fd, or -1 with errno set.
+ * path with argv and envp. Returns the master fd once the exec has
+ * succeeded, or -1 with errno set when the fork or the exec fails.
  * pid_out receives the child's pid. */
 int cpty_spawn(const char *path, char *const argv[], char *const envp[],
                unsigned short cols, unsigned short rows, pid_t *pid_out);
