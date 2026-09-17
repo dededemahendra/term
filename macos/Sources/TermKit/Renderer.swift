@@ -57,6 +57,7 @@ public final class Renderer {
     private var rectsUploaded = 0
     private var cells: [UInt64] = []
     private var dirty: [UInt64] = []
+    private var fresh: [UInt64] = []
     private var cursor = CursorInfo(col: 0, row: 0, shape: 0, blink: false, visible: true)
     public private(set) var cols = 0
     public private(set) var rows = 0
@@ -78,16 +79,25 @@ public final class Renderer {
         rectBuffer = device.makeBuffer(length: 1024 * MemoryLayout<GlyphRect>.stride, options: .storageModeShared)!
     }
 
-    /// Loads a precompiled library from the app bundle when present.
+    /// Loads a precompiled library from the app bundle when it is present
+    /// and contains both cell functions; anything else falls back to the
+    /// runtime compile.
     public static func bundledLibrary(device: MTLDevice) -> MTLLibrary? {
         guard let url = Bundle.main.resourceURL?.appendingPathComponent("default.metallib"),
-              FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try? device.makeLibrary(URL: url)
+              FileManager.default.fileExists(atPath: url.path),
+              let library = try? device.makeLibrary(URL: url),
+              library.makeFunction(name: "cell_vertex") != nil,
+              library.makeFunction(name: "cell_fragment") != nil else { return nil }
+        return library
     }
 
     /// Replaces the atlas, for example after a font size or scale change.
+    /// A fresh rect buffer is allocated because up to three frames that
+    /// reference the old one may still be in flight.
     public func replaceAtlas(_ newAtlas: GlyphAtlas) {
         atlas = newAtlas
+        rectBuffer = device.makeBuffer(length: max(1024, newAtlas.rects.count) * MemoryLayout<GlyphRect>.stride,
+                                       options: .storageModeShared)!
         rectsUploaded = 0
         markAllDirty()
     }
@@ -115,18 +125,15 @@ public final class Renderer {
         if terminal.cols != cols || terminal.rows != rows {
             gridChanged(cols: terminal.cols, rows: terminal.rows)
         }
-        terminal.copyGrid(into: &cells)
-        var fresh: [UInt64] = []
-        terminal.takeDirtyRows(into: &fresh)
+        cursor = terminal.snapshot(cells: &cells, dirty: &fresh)
         for (i, word) in fresh.enumerated() where i < dirty.count {
             dirty[i] |= word
         }
-        cursor = terminal.cursor
         let overflow = terminal.overflowColors
         for row in 0..<rows where dirty[row / 64] & (1 << UInt64(row % 64)) != 0 {
             rebuildRow(row, overflow: overflow)
         }
-        dirty = [UInt64](repeating: 0, count: dirty.count)
+        for i in dirty.indices { dirty[i] = 0 }
     }
 
     private func rebuildRow(_ row: Int, overflow: [TermRgb]) {

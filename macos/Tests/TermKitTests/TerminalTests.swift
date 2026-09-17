@@ -68,4 +68,34 @@ final class TerminalTests: XCTestCase {
         XCTAssertEqual(cells.count, 24)
         XCTAssertEqual(t.dirtyWordCount, 1)
     }
+
+    func testSnapshotReturnsCellsDirtyRowsAndCursorAndClearsDirty() {
+        let t = Terminal(cols: 4, rows: 2, scrollback: 0)
+        t.feed(Array("ab".utf8))
+        var cells: [UInt64] = []
+        var dirty: [UInt64] = []
+        let cursor = t.snapshot(cells: &cells, dirty: &dirty)
+        XCTAssertEqual(cells.count, 8)
+        XCTAssertEqual(Cell(raw: cells[0]).scalar, "a")
+        XCTAssertEqual(Cell(raw: cells[1]).scalar, "b")
+        XCTAssertEqual(cursor.col, 2)
+        XCTAssertEqual(cursor.row, 0)
+        XCTAssertEqual(dirty.count, 1)
+        XCTAssertNotEqual(dirty[0] & 1, 0, "row 0 is dirty after the write")
+        _ = t.snapshot(cells: &cells, dirty: &dirty)
+        XCTAssertEqual(dirty[0], 0, "the snapshot cleared the dirty rows")
+    }
+
+    func testOverflowColorsAreCachedByCount() {
+        let t = Terminal(cols: 4, rows: 1, scrollback: 0)
+        XCTAssertEqual(t.overflowColors.count, 0)
+        t.feed(Array("\u{1B}[38;2;1;2;3mx".utf8))
+        let first = t.overflowColors
+        XCTAssertEqual(first.count, 1)
+        XCTAssertEqual([first[0].r, first[0].g, first[0].b], [1, 2, 3])
+        t.feed(Array("\u{1B}[38;2;4;5;6my".utf8))
+        let second = t.overflowColors
+        XCTAssertEqual(second.count, 2)
+        XCTAssertEqual([second[1].r, second[1].g, second[1].b], [4, 5, 6])
+    }
 }

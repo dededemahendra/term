@@ -115,6 +115,28 @@ public final class Terminal {
         words.withUnsafeMutableBufferPointer { _ = term_dirty_rows(handle, $0.baseAddress, $0.count) }
     }
 
+    /// Copies the visible grid and the dirty bitmap and reads the cursor
+    /// under one lock hold, so output fed on the reader thread cannot
+    /// land between the copy and the clear and be marked clean unseen.
+    /// Both arrays are resized when needed. Returns the cursor.
+    public func snapshot(cells: inout [UInt64], dirty: inout [UInt64]) -> CursorInfo {
+        lock.lock()
+        defer { lock.unlock() }
+        let need = cols * rows
+        if cells.count != need {
+            cells = [UInt64](repeating: 0, count: need)
+        }
+        cells.withUnsafeMutableBufferPointer { _ = term_grid(handle, $0.baseAddress, $0.count) }
+        let words = (rows + 63) / 64
+        if dirty.count != words {
+            dirty = [UInt64](repeating: 0, count: words)
+        }
+        dirty.withUnsafeMutableBufferPointer { _ = term_dirty_rows(handle, $0.baseAddress, $0.count) }
+        var c = TermCursor()
+        _ = term_cursor(handle, &c)
+        return CursorInfo(col: Int(c.col), row: Int(c.row), shape: c.shape, blink: c.blink != 0, visible: c.visible != 0)
+    }
+
     public var cursor: CursorInfo {
         lock.lock()
         defer { lock.unlock() }
@@ -188,14 +210,19 @@ public final class Terminal {
         return Array(responseBuffer[0..<n])
     }
 
-    /// 24-bit colours interned by the core, cell index 256 upward.
+    private var overflowCache: [TermRgb] = []
+
+    /// 24-bit colours interned by the core, cell index 256 upward. The
+    /// table is re-read only when its size changes, so a long session does
+    /// not copy it every frame.
     public var overflowColors: [TermRgb] {
         lock.lock()
         defer { lock.unlock() }
         let count = term_colors(handle, nil, 0)
-        if count == 0 { return [] }
-        var out = [TermRgb](repeating: TermRgb(), count: count)
-        out.withUnsafeMutableBufferPointer { _ = term_colors(handle, $0.baseAddress, $0.count) }
-        return out
+        if count != overflowCache.count {
+            overflowCache = [TermRgb](repeating: TermRgb(), count: count)
+            overflowCache.withUnsafeMutableBufferPointer { _ = term_colors(handle, $0.baseAddress, $0.count) }
+        }
+        return overflowCache
     }
 }
