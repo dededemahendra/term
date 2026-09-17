@@ -3728,7 +3728,7 @@ git commit -m "build(macos): universal release script and cask template"
 - `bench-shell/results.md` has a measured row for the built app.
 - `scripts/release.sh` produces a universal dmg without credentials.
 
-Known deviation from the spec, to rule on later: a shell that fails to spawn is logged to standard error and the app quits when no other window is open, instead of showing the error inside the window and waiting for a keypress.
+Resolved after the whole-branch review: a shell that fails to spawn now opens the window with the error printed into the grid and exits on the next key (see Post-review fixes). The catch in `main.swift` remains only for the case where `/bin/sh` itself cannot run: it logs and quits when no other window is open.
 
 Open items carried from the core plan remain: CI fuzz runs once the repository has a remote, real-program compat recordings captured through this shell, an attribute plane for snapshots, and core hot-path profiling.
 
