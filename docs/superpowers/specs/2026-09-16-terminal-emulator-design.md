@@ -210,8 +210,10 @@ This is the most important decision in the project.
 - The Metal layer runs with `presentsWithTransaction = false` and
   `displaySyncEnabled = false`, so a frame is presented when the GPU
   finishes rather than at the next vertical blank.
-- Key input is written to the PTY on the main thread with no queue. Echo
-  returns through the read path.
+- Key input is handed to one serial write queue as soon as the key
+  arrives, so a child that stops reading can never block the window or the
+  reader thread; the hop costs tens of microseconds. Echo returns through
+  the read path.
 - Under sustained flood, if the core is fed faster than frames render,
   the render loop skips intermediate states and draws only the latest.
   The parser never blocks on the renderer.
@@ -304,6 +306,10 @@ Live in `bench/`, run manually, results recorded in
 | Startup | process start to first presented frame, warm, median of five | under 80 ms |
 | Throughput | time to cat a fixed 100 MB file, compared with Ghostty and Alacritty when installed | at parity or better |
 | Memory | RSS of the idle app after two seconds | under 80 MB |
+
+Every result row records the display and its backing scale, because a
+1x display draws a quarter of the pixels of a 2x one and the shell has
+separate code paths for 1 px and 2 px decorations.
 
 ## Build and distribution
 

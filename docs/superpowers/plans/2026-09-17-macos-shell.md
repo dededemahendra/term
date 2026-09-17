@@ -3723,7 +3723,7 @@ git commit -m "build(macos): universal release script and cask template"
 
 ## Done criteria for this plan
 
-- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 41 tests.
+- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 50 tests.
 - `macos/scripts/run.sh` opens a working terminal: a login shell, colours, wide glyphs, emoji, selection, copy and paste, scrollback with the wheel, cmd-click URLs, font zoom, new window, full screen.
 - `bench-shell/results.md` has a measured row for the built app.
 - `scripts/release.sh` produces a universal dmg without credentials.
@@ -3731,3 +3731,40 @@ git commit -m "build(macos): universal release script and cask template"
 Known deviation from the spec, to rule on later: a shell that fails to spawn is logged to standard error and the app quits when no other window is open, instead of showing the error inside the window and waiting for a keypress.
 
 Open items carried from the core plan remain: CI fuzz runs once the repository has a remote, real-program compat recordings captured through this shell, an attribute plane for snapshots, and core hot-path profiling.
+
+## Post-review fixes
+
+A whole-branch review after Task 14 found defects in code this plan
+specified. They were fixed in five commits on the branch rather than by
+editing the task text above:
+
+- Task 9 shader: the strike band is `floor((cellSize.y - thickness) / 2)`
+  to `+ thickness`, because the old centre test never matched a fragment
+  centre at 1 px thickness. Renderer tests now run at backing scale 1 as
+  well as 2, and pin the strides of `GlyphRect`, `CellInstance` and
+  `Uniforms` at 8, 20 and 80 bytes.
+- Task 2 and Task 9: `Terminal.snapshot(cells:dirty:)` copies the grid,
+  takes the dirty rows and reads the cursor under one lock hold, and
+  `Renderer.update` uses it, so output fed between two calls can no
+  longer be marked clean without being drawn. The dirty word array is
+  reused and the overflow colour table is cached by count.
+- Task 1 and Task 10: `cpty_spawn` reports an exec failure through a
+  close-on-exec pipe, so `Pty.init` throws `spawnFailed`; the session
+  then runs `/bin/sh` with a script that prints the failure into the
+  grid and exits on the next key, which is the spec's behaviour.
+- Task 1: `Pty.write` runs on a serial queue so a child that stops
+  reading blocks neither the window nor the reader thread.
+- Task 9: `replaceAtlas` allocates a fresh rect buffer instead of
+  rewriting one that frames in flight may read; `bundledLibrary` ignores
+  a library missing either cell function.
+- Task 10: `updateGrid` resizes the session only when the cell count
+  changed; timers are invalidated in `deinit`; wide spacer cells map to a
+  space when a line is scanned for a URL; the probe records one commit
+  sample per key; `Config.parse` accepts CRLF line endings.
+- Task 12 and Task 14: `build-shaders.sh` fails when the shader
+  extraction is empty; `bundle.sh` no longer hides codesign errors; the
+  cask file says it is a template.
+- Paste normalisation lives in `TerminalSession.pasteText(_:bracketed:)`
+  with a unit test.
+
+Tests: 50.
