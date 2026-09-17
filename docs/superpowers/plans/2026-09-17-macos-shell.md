@@ -1000,7 +1000,7 @@ git commit -m "feat(macos): resolve cell colours to packed RGBA"
 
 **Interfaces:**
 - Consumes: `CPty`.
-- Produces: `PtyError`, `Pty` (`init(program:arguments:environment:cols:rows:)`, `pid`, `masterFd`, `Pty.loginShell`, `Pty.childEnvironment()`, `startReading(onData:onExit:)`, `write(_:)`, `resize(cols:rows:)`, `close()`).
+- Produces: `PtyError`, `Pty` (`init(program:arguments:environment:cols:rows:)`, `pid`, `masterFd`, `Pty.loginShell`, `Pty.childEnvironment()`, `startReading(onData:onExit:)`, `write(_:)`, `resize(cols:rows:)`, `close()`, `hasExited`). Once the child is reaped, `write`, `resize` and `close` are ignored.
 - The close rule from the Global Constraints lives here: `close()` sends SIGHUP; the reader thread closes the descriptor after the child is reaped.
 
 - [ ] **Step 1: Write the failing tests**
@@ -1059,6 +1059,17 @@ final class PtyTests: XCTestCase {
         let out = try collect(program: "/nonexistent/program", arguments: ["x"])
         XCTAssertEqual(out, "")
     }
+
+    func testCloseAndWriteAfterExitAreIgnored() throws {
+        let pty = try Pty(program: "/bin/echo", arguments: ["echo", "bye"], environment: Pty.childEnvironment(), cols: 10, rows: 2)
+        let done = expectation(description: "exit")
+        pty.startReading(onData: { _ in }, onExit: { done.fulfill() })
+        wait(for: [done], timeout: 5)
+        XCTAssertTrue(pty.hasExited)
+        pty.close()
+        pty.write(Array("ignored".utf8))
+        pty.resize(cols: 5, rows: 5)
+    }
 }
 ```
 
@@ -1085,6 +1096,22 @@ public final class Pty {
     public let pid: pid_t
     public let masterFd: Int32
     private var reader: Thread?
+    private let stateLock = NSLock()
+    private var exited = false
+
+    /// True once the child has been reaped. Writes, resizes and hangups
+    /// after that are ignored, so a recycled pid or descriptor is never hit.
+    public var hasExited: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return exited
+    }
+
+    private func markExited() {
+        stateLock.lock()
+        exited = true
+        stateLock.unlock()
+    }
 
     /// Spawns `program` with `arguments` (argv[0] included) and `environment`.
     public init(program: String, arguments: [String], environment: [String: String], cols: Int, rows: Int) throws {
@@ -1127,7 +1154,7 @@ public final class Pty {
     public func startReading(onData: @escaping (UnsafeRawBufferPointer) -> Void, onExit: @escaping () -> Void) {
         let fd = masterFd
         let pid = self.pid
-        let thread = Thread {
+        let thread = Thread { [weak self] in
             var buffer = [UInt8](repeating: 0, count: 64 * 1024)
             while true {
                 let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
@@ -1141,6 +1168,7 @@ public final class Pty {
             }
             var status: Int32 = 0
             waitpid(pid, &status, 0)
+            self?.markExited()
             _ = Darwin.close(fd)
             onExit()
         }
@@ -1152,6 +1180,7 @@ public final class Pty {
 
     /// Writes all of `bytes`, retrying on partial writes.
     public func write(_ bytes: [UInt8]) {
+        guard !hasExited else { return }
         bytes.withUnsafeBytes { raw in
             guard var p = raw.baseAddress else { return }
             var left = raw.count
@@ -1168,6 +1197,7 @@ public final class Pty {
     }
 
     public func resize(cols: Int, rows: Int) {
+        guard !hasExited else { return }
         _ = cpty_resize(masterFd, UInt16(clamping: cols), UInt16(clamping: rows))
     }
 
@@ -1175,6 +1205,7 @@ public final class Pty {
     /// child's side goes away; closing it here would deadlock against the
     /// blocked read on macOS.
     public func close() {
+        guard !hasExited else { return }
         kill(pid, SIGHUP)
     }
 }
@@ -1183,7 +1214,7 @@ public final class Pty {
 - [ ] **Step 4: Run to verify pass**
 
 Run: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter PtyTests` from `macos/`
-Expected: 4 tests, 0 failures.
+Expected: 5 tests, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -3139,7 +3170,7 @@ public final class TerminalView: NSView, NSTextInputClient {
 - [ ] **Step 3: Build and run the whole suite**
 
 Run: `swift build` from `macos/`, then `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` from `macos/`
-Expected: no warnings; 40 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
+Expected: no warnings; 41 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
 
 - [ ] **Step 4: Commit**
 
@@ -3671,7 +3702,7 @@ git commit -m "build(macos): universal release script and cask template"
 
 ## Done criteria for this plan
 
-- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 40 tests.
+- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 41 tests.
 - `macos/scripts/run.sh` opens a working terminal: a login shell, colours, wide glyphs, emoji, selection, copy and paste, scrollback with the wheel, cmd-click URLs, font zoom, new window, full screen.
 - `bench-shell/results.md` has a measured row for the built app.
 - `scripts/release.sh` produces a universal dmg without credentials.
