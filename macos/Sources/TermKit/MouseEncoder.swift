@@ -17,6 +17,8 @@ public enum MouseEncoder {
     public static func encode(button: MouseButton, col: Int, row: Int, pressed: Bool, motion: Bool,
                               modifiers: KeyModifiers, sgr: Bool) -> [UInt8] {
         var code = button.rawValue
+        // Wheel events have no release; report them as presses whatever the caller passed.
+        let pressed = pressed || button == .wheelUp || button == .wheelDown
         if modifiers.contains(.shift) { code += 4 }
         if modifiers.contains(.option) { code += 8 }
         if modifiers.contains(.control) { code += 16 }

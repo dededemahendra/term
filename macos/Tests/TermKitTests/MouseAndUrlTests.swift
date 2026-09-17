@@ -24,6 +24,13 @@ final class MouseEncoderTests: XCTestCase {
                        [0x1B, 0x5B, 0x4D, 37, 38, 35])
         XCTAssertEqual(MouseEncoder.encode(button: .left, col: 300, row: 0, pressed: true, motion: false, modifiers: [], sgr: false), [])
     }
+
+    func testWheelIsAlwaysAPress() {
+        XCTAssertEqual(MouseEncoder.encode(button: .wheelDown, col: 0, row: 0, pressed: false, motion: false, modifiers: [], sgr: true),
+                       Array("\u{1B}[<65;1;1M".utf8))
+        XCTAssertEqual(MouseEncoder.encode(button: .wheelUp, col: 0, row: 0, pressed: false, motion: false, modifiers: [], sgr: false),
+                       [0x1B, 0x5B, 0x4D, 96, 33, 33])
+    }
 }
 
 final class UrlDetectorTests: XCTestCase {
