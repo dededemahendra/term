@@ -67,6 +67,23 @@ final class PtyTests: XCTestCase {
         XCTAssertTrue(pty.hasExited)
     }
 
+    /// A write queued while the child lived may still be draining when the
+    /// child exits; the descriptor must stay open until that write returns
+    /// and be closed afterwards.
+    func testMasterClosesAfterQueuedWritesOnceTheChildExits() throws {
+        let pty = try Pty(program: "/bin/sleep", arguments: ["sleep", "0.2"], environment: Pty.childEnvironment(), cols: 10, rows: 2)
+        let exited = expectation(description: "exit")
+        pty.startReading(onData: { _ in }, onExit: { exited.fulfill() })
+        pty.write([UInt8](repeating: 0x61, count: 4 * 1024 * 1024))
+        wait(for: [exited], timeout: 5)
+        XCTAssertTrue(pty.hasExited)
+        let deadline = Date().addingTimeInterval(2)
+        while fcntl(pty.masterFd, F_GETFD) >= 0, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertEqual(fcntl(pty.masterFd, F_GETFD), -1, "the master is closed once the queued write has drained")
+    }
+
     func testLargeWriteReturnsBeforeTheChildReads() throws {
         // sleep never reads stdin, so the pty's buffer fills and the write
         // would block a caller that wrote inline.

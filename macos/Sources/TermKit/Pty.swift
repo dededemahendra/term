@@ -84,8 +84,16 @@ public final class Pty {
             }
             var status: Int32 = 0
             waitpid(pid, &status, 0)
-            self?.markExited()
-            _ = Darwin.close(fd)
+            if let self {
+                // Mark first, so nothing new is queued, then close on the
+                // write queue behind every write that was queued while the
+                // child lived. No write can reach a closed or recycled
+                // descriptor: later writes see the flag and return.
+                self.markExited()
+                self.writeQueue.async { _ = Darwin.close(fd) }
+            } else {
+                _ = Darwin.close(fd)
+            }
             onExit()
         }
         thread.name = "pty-reader"
@@ -124,9 +132,10 @@ public final class Pty {
         _ = cpty_resize(masterFd, UInt16(clamping: cols), UInt16(clamping: rows))
     }
 
-    /// Hangs up the child. The reader thread closes the master once the
-    /// child's side goes away; closing it here would deadlock against the
-    /// blocked read on macOS.
+    /// Hangs up the child. The master is closed once the child's side goes
+    /// away, on the write queue after the reader thread has reaped the
+    /// child; closing it here would deadlock against the blocked read on
+    /// macOS.
     public func close() {
         guard !hasExited else { return }
         kill(pid, SIGHUP)
