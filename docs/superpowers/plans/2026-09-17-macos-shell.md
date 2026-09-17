@@ -3392,6 +3392,7 @@ if [ "${1:-}" = "--universal" ]; then
     # ones write them to .build/release like a single-arch build.
     BINARY=.build/apple/Products/Release/Term
     [ -f "$BINARY" ] || BINARY=.build/release/Term
+    lipo -archs "$BINARY" | grep -q x86_64 || { echo "universal build did not produce a fat binary" >&2; exit 1; }
 else
     swift build -c release
     BINARY=.build/release/Term
@@ -3679,6 +3680,8 @@ if [ -n "${TERM_SIGN_IDENTITY:-}" ] && [ -n "${TERM_NOTARY_PROFILE:-}" ]; then
     xcrun notarytool submit "$DMG" --keychain-profile "$TERM_NOTARY_PROFILE" --wait
     xcrun stapler staple "$DMG"
 fi
+# Put the arm64 archive back so development builds do not link the fat one.
+scripts/build-core.sh >/dev/null
 echo "built $DMG"
 ```
 
@@ -3707,7 +3710,7 @@ end
 - [ ] **Step 2: Run the release script without credentials**
 
 Run from `macos/`: `scripts/release.sh`
-Expected: it installs the x86_64 Rust target if missing, builds a fat core archive, a universal binary (`lipo -info build/Term.app/Contents/MacOS/Term` lists `x86_64 arm64`), an ad hoc signed bundle and `build/Term-0.1.0.dmg`. Then run `scripts/build-core.sh` again so the arm64 archive is back in use for development.
+Expected: it installs the x86_64 Rust target if missing, builds a fat core archive, a universal binary (`lipo -info build/Term.app/Contents/MacOS/Term` lists `x86_64 arm64`), an ad hoc signed bundle and `build/Term-0.1.0.dmg`, and finishes by rebuilding the arm64 core archive so `target/universal` is gone and development builds link the native archive again.
 
 - [ ] **Step 3: Commit**
 
