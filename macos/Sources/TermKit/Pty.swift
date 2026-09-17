@@ -1,0 +1,106 @@
+import CPty
+import Darwin
+import Foundation
+
+public enum PtyError: Error, Equatable {
+    case spawnFailed(errno: Int32)
+}
+
+/// A child process on a pseudo terminal.
+public final class Pty {
+    public let pid: pid_t
+    public let masterFd: Int32
+    private var reader: Thread?
+
+    /// Spawns `program` with `arguments` (argv[0] included) and `environment`.
+    public init(program: String, arguments: [String], environment: [String: String], cols: Int, rows: Int) throws {
+        var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { strdup($0) }
+        argv.append(nil)
+        var envp: [UnsafeMutablePointer<CChar>?] = environment.map { strdup("\($0.key)=\($0.value)") }
+        envp.append(nil)
+        defer {
+            argv.forEach { free($0) }
+            envp.forEach { free($0) }
+        }
+        var pid: pid_t = 0
+        let fd = cpty_spawn(program, argv, envp, UInt16(clamping: cols), UInt16(clamping: rows), &pid)
+        if fd < 0 {
+            throw PtyError.spawnFailed(errno: errno)
+        }
+        self.pid = pid
+        self.masterFd = fd
+    }
+
+    /// The user's login shell, or zsh.
+    public static var loginShell: String {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? ""
+        return shell.isEmpty ? "/bin/zsh" : shell
+    }
+
+    /// Environment for a child: the app's own plus the terminal identity.
+    public static func childEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["TERM"] = "xterm-256color"
+        env["COLORTERM"] = "truecolor"
+        env["TERM_PROGRAM"] = "term"
+        env.removeValue(forKey: "TERM_PROBE")
+        return env
+    }
+
+    /// Starts a thread that reads output until the child closes the
+    /// terminal. `onData` runs on that thread with a buffer that is only
+    /// valid during the call. `onExit` runs once, after the child is reaped.
+    public func startReading(onData: @escaping (UnsafeRawBufferPointer) -> Void, onExit: @escaping () -> Void) {
+        let fd = masterFd
+        let pid = self.pid
+        let thread = Thread {
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+            while true {
+                let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+                if n > 0 {
+                    buffer.withUnsafeBytes { onData(UnsafeRawBufferPointer(rebasing: $0[0..<n])) }
+                } else if n < 0 && (errno == EINTR || errno == EAGAIN) {
+                    continue
+                } else {
+                    break
+                }
+            }
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
+            _ = Darwin.close(fd)
+            onExit()
+        }
+        thread.name = "pty-reader"
+        thread.qualityOfService = .userInteractive
+        reader = thread
+        thread.start()
+    }
+
+    /// Writes all of `bytes`, retrying on partial writes.
+    public func write(_ bytes: [UInt8]) {
+        bytes.withUnsafeBytes { raw in
+            guard var p = raw.baseAddress else { return }
+            var left = raw.count
+            while left > 0 {
+                let n = Darwin.write(masterFd, p, left)
+                if n < 0 {
+                    if errno == EINTR || errno == EAGAIN { continue }
+                    return
+                }
+                left -= n
+                p += n
+            }
+        }
+    }
+
+    public func resize(cols: Int, rows: Int) {
+        _ = cpty_resize(masterFd, UInt16(clamping: cols), UInt16(clamping: rows))
+    }
+
+    /// Hangs up the child. The reader thread closes the master once the
+    /// child's side goes away; closing it here would deadlock against the
+    /// blocked read on macOS.
+    public func close() {
+        kill(pid, SIGHUP)
+    }
+}
