@@ -1475,6 +1475,13 @@ final class MouseEncoderTests: XCTestCase {
                        [0x1B, 0x5B, 0x4D, 37, 38, 35])
         XCTAssertEqual(MouseEncoder.encode(button: .left, col: 300, row: 0, pressed: true, motion: false, modifiers: [], sgr: false), [])
     }
+
+    func testWheelIsAlwaysAPress() {
+        XCTAssertEqual(MouseEncoder.encode(button: .wheelDown, col: 0, row: 0, pressed: false, motion: false, modifiers: [], sgr: true),
+                       Array("\u{1B}[<65;1;1M".utf8))
+        XCTAssertEqual(MouseEncoder.encode(button: .wheelUp, col: 0, row: 0, pressed: false, motion: false, modifiers: [], sgr: false),
+                       [0x1B, 0x5B, 0x4D, 96, 33, 33])
+    }
 }
 
 final class UrlDetectorTests: XCTestCase {
@@ -1526,6 +1533,8 @@ public enum MouseEncoder {
     public static func encode(button: MouseButton, col: Int, row: Int, pressed: Bool, motion: Bool,
                               modifiers: KeyModifiers, sgr: Bool) -> [UInt8] {
         var code = button.rawValue
+        // Wheel events have no release; report them as presses whatever the caller passed.
+        let pressed = pressed || button == .wheelUp || button == .wheelDown
         if modifiers.contains(.shift) { code += 4 }
         if modifiers.contains(.option) { code += 8 }
         if modifiers.contains(.control) { code += 16 }
@@ -1581,7 +1590,7 @@ public enum UrlDetector {
 - [ ] **Step 4: Run to verify pass**
 
 Run: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter MouseEncoderTests` from `macos/` and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --filter UrlDetectorTests` from `macos/`
-Expected: 2 tests each, 0 failures.
+Expected: 3 and 2 tests, 0 failures.
 
 - [ ] **Step 5: Commit**
 
@@ -3101,7 +3110,7 @@ public final class TerminalView: NSView, NSTextInputClient {
 - [ ] **Step 3: Build and run the whole suite**
 
 Run: `swift build` from `macos/`, then `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` from `macos/`
-Expected: no warnings; 38 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
+Expected: no warnings; 39 tests, 0 failures. There are no unit tests for the view; Task 11 verifies it on screen.
 
 - [ ] **Step 4: Commit**
 
@@ -3633,7 +3642,7 @@ git commit -m "build(macos): universal release script and cask template"
 
 ## Done criteria for this plan
 
-- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 38 tests.
+- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 39 tests.
 - `macos/scripts/run.sh` opens a working terminal: a login shell, colours, wide glyphs, emoji, selection, copy and paste, scrollback with the wheel, cmd-click URLs, font zoom, new window, full screen.
 - `bench-shell/results.md` has a measured row for the built app.
 - `scripts/release.sh` produces a universal dmg without credentials.
