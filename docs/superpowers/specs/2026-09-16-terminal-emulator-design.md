@@ -8,9 +8,14 @@ Status: approved for planning
 A GUI terminal emulator, macOS first, that is lighter and faster than the
 current field. Success is measured in this order:
 
-1. Input latency. Keystroke to pixel under 5 ms median on Apple Silicon.
-2. Startup. Launch to first prompt frame under 50 ms. Idle RSS in single
-   digit MB. Near zero CPU when nothing is happening.
+1. Input latency. Keystroke to GPU commit under 1 ms median on Apple
+   Silicon. Keystroke to pixel is then bounded by the display's refresh:
+   about 8 ms average on a 60 Hz display, 4 ms on 120 Hz, which no
+   terminal can beat.
+2. Startup. Launch to first frame under 80 ms warm on Apple Silicon;
+   AppKit and window server setup alone cost about 55 ms of that. Idle
+   RSS under 80 MB, almost all of it AppKit and Metal framework memory.
+   Near zero CPU when nothing is happening.
 3. Throughput. Consume a 100 MB output stream without stalling, measured
    against Ghostty and Alacritty on the same machine.
 
@@ -56,8 +61,10 @@ One repo, two languages, three layers.
 ```
 term/
   core/        Rust library. No platform code. C ABI (staticlib + cdylib).
-  macos/       Swift app. AppKit window, PTY, CoreText, Metal renderer.
-  bench/       Latency, startup, throughput and memory harness.
+  macos/       Swift package. AppKit window, PTY, CoreText, Metal renderer,
+               assembled into Term.app by a script.
+  bench/       Core throughput crate.
+  bench-shell/ Startup, latency, throughput and memory scripts for the app.
   docs/superpowers/specs/
 ```
 
@@ -166,7 +173,9 @@ dirty.
 
 ## Rendering pipeline (Metal)
 
-One pipeline, one draw call per frame.
+One pipeline, one draw call per frame. The shader source is embedded in
+the app and compiled at runtime unless a precompiled library was built
+with Xcode's Metal toolchain, in which case that is loaded instead.
 
 The renderer keeps a persistent vertex buffer with one instance per cell.
 Each instance is 16 bytes: grid column and row, atlas rectangle index,
@@ -213,13 +222,17 @@ This is the most important decision in the project.
   Retina via contents scale. Fullscreen, resize, configured padding.
   Resize recomputes grid size from the font's cell metrics and calls
   `term_resize`, then sends `TIOCSWINSZ`.
-- PTY: `posix_openpt` and `forkpty` directly, no library. Spawns the
-  configured shell as a login shell with `TERM=xterm-256color` and
-  `COLORTERM=truecolor`.
-- Input: `NSEvent` keys mapped to escape sequences, honouring application
-  cursor mode, modifiers and the alt-as-meta option. Cmd shortcuts: new
-  window, close window, copy, paste, font size up, down and reset. Paste
-  is wrapped when bracketed paste mode is on.
+- PTY: `forkpty` through a small C shim (Swift cannot fork safely).
+  Spawns the configured shell as a login shell with `TERM=xterm-256color`
+  and `COLORTERM=truecolor`. Window size changes send `TIOCSWINSZ`. The
+  child is hung up with SIGHUP on close; the reader thread closes the
+  master afterwards, because closing it from another thread deadlocks on
+  macOS.
+- Input: control, function and option-as-meta keys are encoded straight
+  from the key event; everything else goes through `NSTextInputClient`,
+  so dead keys and input methods work. Cmd shortcuts: new window, close
+  window, copy, paste, select all, font size up, down and reset. Paste is
+  wrapped when bracketed paste mode is on.
 - Mouse: click, drag, double and triple click drive core selection.
   Cmd-click on a URL opens it via `NSWorkspace`. Scroll wheel moves the
   viewport. When the program has mouse reporting on, events are encoded
@@ -287,19 +300,23 @@ Live in `bench/`, run manually, results recorded in
 
 | benchmark | method | target |
 |---|---|---|
-| Latency | inject keystroke, timestamp the first frame where the cell's pixels change, median and p99 | under 5 ms median |
-| Startup | launch to first prompt frame | under 50 ms |
-| Throughput | time to consume a fixed 100 MB file, compared with Ghostty and Alacritty | at parity or better |
-| Memory | RSS after launch and after the throughput run | single digit MB idle |
+| Latency | synthetic keystrokes echoed by the tty; time to GPU commit and to presented frame, median and p99 | under 1 ms median to commit |
+| Startup | process start to first presented frame, warm, median of five | under 80 ms |
+| Throughput | time to cat a fixed 100 MB file, compared with Ghostty and Alacritty when installed | at parity or better |
+| Memory | RSS of the idle app after two seconds | under 80 MB |
 
 ## Build and distribution
 
-- `cargo build --release` builds the core as a static library for arm64
-  and x86_64. Rust is pinned by `rust-toolchain.toml`.
-- The macOS app is an Xcode project linking the static library, built
-  with `xcodebuild` into a universal `.app`.
-- Release is a notarised `.dmg` and a Homebrew cask. Signing and
-  notarising are scripted once.
+- `cargo build --release` builds the core as a static library; a
+  `--universal` script option adds x86_64 and merges the two with lipo.
+  Rust is pinned by `rust-toolchain.toml`.
+- The macOS app is a Swift package linking the static library. A script
+  assembles `Term.app` with an ad hoc signature for development; the
+  release script builds a universal binary, signs and notarises when
+  credentials are in the environment, and produces a `.dmg`. Tests run
+  with `swift test` under Xcode's toolchain (`DEVELOPER_DIR`), because
+  the command line tools ship no XCTest.
+- Release is a notarised `.dmg` and a Homebrew cask.
 
 ## Open decisions deferred to later versions
 
