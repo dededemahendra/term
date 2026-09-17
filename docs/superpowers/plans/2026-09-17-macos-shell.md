@@ -3388,7 +3388,10 @@ cd "$(dirname "$0")/.."
 VERSION=$(sed -n 's/.*static let string = "\(.*\)".*/\1/p' Sources/TermKit/Version.swift)
 if [ "${1:-}" = "--universal" ]; then
     swift build -c release --arch arm64 --arch x86_64
+    # Older toolchains put multi-arch products under .build/apple; newer
+    # ones write them to .build/release like a single-arch build.
     BINARY=.build/apple/Products/Release/Term
+    [ -f "$BINARY" ] || BINARY=.build/release/Term
 else
     swift build -c release
     BINARY=.build/release/Term
