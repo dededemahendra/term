@@ -43,6 +43,6 @@ double cpty_process_start_uptime(void) {
     gettimeofday(&now, NULL);
     double age = (now.tv_sec - start.tv_sec) + (now.tv_usec - start.tv_usec) / 1e6;
     struct timespec uptime;
-    clock_gettime(CLOCK_MONOTONIC_RAW, &uptime);
+    clock_gettime(CLOCK_UPTIME_RAW, &uptime);
     return (uptime.tv_sec + uptime.tv_nsec / 1e9) - age;
 }
