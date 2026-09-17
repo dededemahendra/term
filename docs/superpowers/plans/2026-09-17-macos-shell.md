@@ -3723,7 +3723,7 @@ git commit -m "build(macos): universal release script and cask template"
 
 ## Done criteria for this plan
 
-- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 50 tests.
+- `swift build` is warning free and `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test` passes all 51 tests.
 - `macos/scripts/run.sh` opens a working terminal: a login shell, colours, wide glyphs, emoji, selection, copy and paste, scrollback with the wheel, cmd-click URLs, font zoom, new window, full screen.
 - `bench-shell/results.md` has a measured row for the built app.
 - `scripts/release.sh` produces a universal dmg without credentials.
@@ -3753,7 +3753,9 @@ editing the task text above:
   then runs `/bin/sh` with a script that prints the failure into the
   grid and exits on the next key, which is the spec's behaviour.
 - Task 1: `Pty.write` runs on a serial queue so a child that stops
-  reading blocks neither the window nor the reader thread.
+  reading blocks neither the window nor the reader thread. The master is
+  closed on that queue after the reader thread reaps the child, so no
+  queued write can reach a closed or recycled descriptor.
 - Task 9: `replaceAtlas` allocates a fresh rect buffer instead of
   rewriting one that frames in flight may read; `bundledLibrary` ignores
   a library missing either cell function.
@@ -3767,4 +3769,4 @@ editing the task text above:
 - Paste normalisation lives in `TerminalSession.pasteText(_:bracketed:)`
   with a unit test.
 
-Tests: 50.
+Tests: 51.
