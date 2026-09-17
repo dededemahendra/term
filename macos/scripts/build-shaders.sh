@@ -7,13 +7,15 @@ set -eu
 cd "$(dirname "$0")/.."
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 mkdir -p build
-if ! xcrun -sdk macosx -f metal >/dev/null 2>&1; then
-    echo "metal compiler not available; the app will compile shaders at runtime"
-    exit 0
-fi
 # Extract the shader text between the triple quotes in Shaders.swift.
 awk '/public static let source = """/{f=1; next} /^    """/{f=0} f' Sources/TermKit/Shaders.swift \
     | sed 's/^    //' > build/cells.metal
-xcrun -sdk macosx metal -c build/cells.metal -o build/cells.air
+# Xcode 27 registers a stub metal binary even when the toolchain component
+# is absent, so the only reliable check is to attempt the compile.
+if ! xcrun -sdk macosx metal -c build/cells.metal -o build/cells.air 2> build/metal.log; then
+    echo "metal compiler not available; the app will compile shaders at runtime"
+    rm -f build/cells.air build/default.metallib
+    exit 0
+fi
 xcrun -sdk macosx metallib build/cells.air -o build/default.metallib
 echo "built build/default.metallib"
