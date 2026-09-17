@@ -2405,7 +2405,7 @@ public final class Renderer {
         encoder.label = "cells"
         if !instances.isEmpty {
             let buffer = instanceBuffers[frameIndex % 3]
-            instances.withUnsafeBytes { raw in memcpy(buffer.contents(), raw.baseAddress!, raw.count) }
+            _ = instances.withUnsafeBytes { raw in memcpy(buffer.contents(), raw.baseAddress!, raw.count) }
             let shape = cursorShapeOverride ?? cursor.shape
             let visible = cursor.visible && !cursorHidden
             var uniforms = Uniforms(
