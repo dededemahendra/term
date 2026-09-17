@@ -24,4 +24,6 @@ if [ -n "${TERM_SIGN_IDENTITY:-}" ] && [ -n "${TERM_NOTARY_PROFILE:-}" ]; then
     xcrun notarytool submit "$DMG" --keychain-profile "$TERM_NOTARY_PROFILE" --wait
     xcrun stapler staple "$DMG"
 fi
+# Put the arm64 archive back so development builds do not link the fat one.
+scripts/build-core.sh >/dev/null
 echo "built $DMG"

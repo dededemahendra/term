@@ -11,6 +11,7 @@ if [ "${1:-}" = "--universal" ]; then
     # ones write them to .build/release like a single-arch build.
     BINARY=.build/apple/Products/Release/Term
     [ -f "$BINARY" ] || BINARY=.build/release/Term
+    lipo -archs "$BINARY" | grep -q x86_64 || { echo "universal build did not produce a fat binary" >&2; exit 1; }
 else
     swift build -c release
     BINARY=.build/release/Term
