@@ -82,7 +82,8 @@ public enum Shaders {
         float thickness = max(1.0, floor(u.cellSize.y / 14.0));
         float y = in.local.y;
         if ((in.flags & FLAG_UNDERLINE) && y >= u.cellSize.y - thickness) { color = in.fg; }
-        if ((in.flags & FLAG_STRIKE) && fabs(y - u.cellSize.y * 0.5) < thickness * 0.5) { color = in.fg; }
+        float strikeTop = floor((u.cellSize.y - thickness) * 0.5);
+        if ((in.flags & FLAG_STRIKE) && y >= strikeTop && y < strikeTop + thickness) { color = in.fg; }
         if (in.flags & FLAG_CURSOR) {
             if (u.cursor.z == 1.0 && y >= u.cellSize.y - thickness * 2.0) { color = u.cursorColor; }
             if (u.cursor.z == 2.0 && in.local.x < thickness * 2.0) { color = u.cursorColor; }
