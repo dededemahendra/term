@@ -66,6 +66,14 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(warnings[4].contains("expected key = value"))
     }
 
+    func testHexValueWithTrailingComment() {
+        var warnings: [String] = []
+        let c = Config.parse("foreground = #ffffff # note\nbackground=#000000#dark\n", warn: { warnings.append($0) })
+        XCTAssertEqual(warnings, [])
+        XCTAssertEqual(c.foreground, RGB(255, 255, 255))
+        XCTAssertEqual(c.background, RGB(0, 0, 0))
+    }
+
     func testMissingFileGivesDefaults() {
         XCTAssertEqual(Config.load(path: "/nonexistent/term/config"), Config())
     }

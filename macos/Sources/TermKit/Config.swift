@@ -76,9 +76,10 @@ public struct Config: Equatable {
             }
             let key = trimmedLine[..<eq].trimmingCharacters(in: .whitespaces)
             var value = trimmedLine[trimmedLine.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-            // A "#" starts a trailing comment, but not when it opens the value itself
-            // (hex colours are written "#rrggbb").
-            if let hashIndex = value.firstIndex(of: "#"), hashIndex > value.startIndex {
+            // A "#" starts a trailing comment, but a leading "#" is the value's own
+            // (hex colours are written "#rrggbb"), so skip past it before searching.
+            let searchStart = value.hasPrefix("#") ? value.index(after: value.startIndex) : value.startIndex
+            if let hashIndex = value[searchStart...].firstIndex(of: "#") {
                 value = value[..<hashIndex].trimmingCharacters(in: .whitespaces)
             }
             if !config.apply(key: key, value: value) {
