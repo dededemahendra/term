@@ -32,12 +32,14 @@ final class PtyTests: XCTestCase {
         let seen = expectation(description: "echo")
         var output = [UInt8]()
         let lock = NSLock()
+        var fulfilled = false
         pty.startReading(onData: { bytes in
             lock.lock()
             output.append(contentsOf: bytes)
-            let text = String(decoding: output, as: UTF8.self)
+            let hit = !fulfilled && String(decoding: output, as: UTF8.self).contains("ping")
+            if hit { fulfilled = true }
             lock.unlock()
-            if text.contains("ping") { seen.fulfill() }
+            if hit { seen.fulfill() }
         }, onExit: {})
         pty.write(Array("ping\r".utf8))
         wait(for: [seen], timeout: 5)
