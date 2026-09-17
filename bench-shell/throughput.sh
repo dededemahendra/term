@@ -17,7 +17,15 @@ printf 'term: '; grep real "$OUT"
 for app in Ghostty Alacritty; do
     if [ -d "/Applications/$app.app" ]; then
         rm -f "$OUT"
-        open -W -n "/Applications/$app.app" --args -e /bin/sh -c "( time cat $BIG ) 2> $OUT"
+        open -n "/Applications/$app.app" --args -e /bin/sh -c "( time cat $BIG ) 2> $OUT"
+        # Wait for the timing to land, then close the comparison instance
+        # ourselves: some terminals keep their window open after -e exits.
+        for _ in $(seq 1 60); do
+            [ -s "$OUT" ] && break
+            sleep 1
+        done
+        sleep 1
+        pkill -f "term-bench-100mb" 2>/dev/null || true
         printf '%s: ' "$app"; grep real "$OUT" || echo "no result"
     fi
 done
