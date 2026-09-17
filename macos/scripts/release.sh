@@ -9,7 +9,7 @@ set -eu
 cd "$(dirname "$0")/.."
 VERSION=$(sed -n 's/.*static let string = "\(.*\)".*/\1/p' Sources/TermKit/Version.swift)
 scripts/build-core.sh --universal
-scripts/build-shaders.sh || true
+scripts/build-shaders.sh
 scripts/bundle.sh --universal
 APP=build/Term.app
 if [ -n "${TERM_SIGN_IDENTITY:-}" ]; then
