@@ -43,6 +43,8 @@ public final class GlyphAtlas {
     public let cellHeight: Int
     /// Pixels from the bottom of a cell to the baseline.
     public let baseline: Int
+    /// Largest texture edge the atlas will grow to. Beyond it, new glyphs draw blank.
+    public let maxTextureSize: Int
     public private(set) var texture: MTLTexture
     public private(set) var rects: [GlyphRect] = [GlyphRect(x: 0, y: 0, w: 0, h: 0)]
     /// Bumped whenever `texture` is replaced by a larger one.
@@ -88,11 +90,12 @@ public final class GlyphAtlas {
     }
 
     public init(device: MTLDevice, fontName: String, pointSize: CGFloat, scale: CGFloat, lineHeight: CGFloat,
-                warn: (String) -> Void = { _ in }) {
+                warn: (String) -> Void = { _ in }, maxTextureSize: Int = 4096) {
         self.device = device
         self.fontName = fontName
         self.pointSize = pointSize
         self.scale = scale
+        self.maxTextureSize = maxTextureSize
         queue = device.makeCommandQueue()!
         let base = GlyphAtlas.resolveFont(name: fontName, size: pointSize * scale, warn: warn)
         func styled(_ traits: CTFontSymbolicTraits) -> CTFont {
@@ -108,15 +111,19 @@ public final class GlyphAtlas {
         cellWidth = m.cellWidth
         cellHeight = m.cellHeight
         baseline = m.baseline
-        texture = GlyphAtlas.makeTexture(device: device, size: 512)
+        guard let initial = GlyphAtlas.makeTexture(device: device, size: 512) else {
+            // A 1 MB allocation failing at startup means Metal itself is unusable.
+            preconditionFailure("Metal could not allocate the glyph atlas")
+        }
+        texture = initial
     }
 
-    private static func makeTexture(device: MTLDevice, size: Int) -> MTLTexture {
+    private static func makeTexture(device: MTLDevice, size: Int) -> MTLTexture? {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: size, height: size, mipmapped: false)
         descriptor.usage = [.shaderRead]
         descriptor.storageMode = .shared
-        let texture = device.makeTexture(descriptor: descriptor)!
-        texture.label = "glyph atlas \(size)"
+        let texture = device.makeTexture(descriptor: descriptor)
+        texture?.label = "glyph atlas \(size)"
         return texture
     }
 
@@ -188,7 +195,9 @@ public final class GlyphAtlas {
             var position = CGPoint(x: max(0, (CGFloat(slotWidth) - advance.width) / 2), y: CGFloat(baseline))
             CTFontDrawGlyphs(font, &glyph, &position, 1, ctx)
         }
-        let rect = place(width: width, height: height)
+        guard let rect = place(width: width, height: height) else {
+            return GlyphRef(index: 0, isColor: false)
+        }
         pixels.withUnsafeBytes { raw in
             texture.replace(region: MTLRegionMake2D(Int(rect.x), Int(rect.y), width, height), mipmapLevel: 0,
                             withBytes: raw.baseAddress!, bytesPerRow: width * 4)
@@ -198,13 +207,14 @@ public final class GlyphAtlas {
     }
 
     /// Reserves a slot, moving to the next shelf or growing the texture.
-    private func place(width: Int, height: Int) -> GlyphRect {
+    /// Nil when the atlas has reached its cap or the GPU refused to grow it.
+    private func place(width: Int, height: Int) -> GlyphRect? {
         if cursorX + width > texture.width {
             cursorX = 0
             cursorY += height
         }
-        while cursorY + height > texture.height {
-            grow()
+        while cursorY + height > texture.height || width > texture.width {
+            if !grow() { return nil }
         }
         let rect = GlyphRect(x: UInt16(cursorX), y: UInt16(cursorY), w: UInt16(width), h: UInt16(height))
         cursorX += width
@@ -212,10 +222,12 @@ public final class GlyphAtlas {
     }
 
     /// Doubles the texture, copying existing glyphs into the top left.
-    private func grow() {
-        let bigger = GlyphAtlas.makeTexture(device: device, size: texture.width * 2)
-        let commands = queue.makeCommandBuffer()!
-        let blit = commands.makeBlitCommandEncoder()!
+    /// False when the cap is reached or an allocation fails.
+    private func grow() -> Bool {
+        guard texture.width < maxTextureSize,
+              let bigger = GlyphAtlas.makeTexture(device: device, size: texture.width * 2),
+              let commands = queue.makeCommandBuffer(),
+              let blit = commands.makeBlitCommandEncoder() else { return false }
         blit.copy(from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                   sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1),
                   to: bigger, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
@@ -224,5 +236,6 @@ public final class GlyphAtlas {
         commands.waitUntilCompleted()
         texture = bigger
         generation += 1
+        return true
     }
 }

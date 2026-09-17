@@ -74,4 +74,18 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertGreaterThan(atlas.generation, startGeneration)
         XCTAssertEqual(inkedPixels(atlas, atlas.rects[Int(first.index)]), before)
     }
+
+    func testAtlasStopsGrowingAtItsCapAndDrawsBlanks() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let atlas = GlyphAtlas(device: device, fontName: "Menlo", pointSize: 13, scale: 2, lineHeight: 1, maxTextureSize: 512)
+        let first = atlas.glyph(for: "M", style: [], wide: false)
+        var blanks = 0
+        for cp in 0x4E00..<(0x4E00 + 400) where atlas.glyph(for: Unicode.Scalar(cp)!, style: [], wide: true).index == 0 {
+            blanks += 1
+        }
+        XCTAssertEqual(atlas.generation, 0)
+        XCTAssertEqual(atlas.texture.width, 512)
+        XCTAssertGreaterThan(blanks, 0)
+        XCTAssertEqual(atlas.glyph(for: "M", style: [], wide: false).index, first.index, "cached glyphs still resolve")
+    }
 }
