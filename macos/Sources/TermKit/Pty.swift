@@ -13,6 +13,7 @@ public final class Pty {
     private var reader: Thread?
     private let stateLock = NSLock()
     private var exited = false
+    private let writeQueue = DispatchQueue(label: "pty-writer", qos: .userInteractive)
 
     /// True once the child has been reaped. Writes, resizes and hangups
     /// after that are ignored, so a recycled pid or descriptor is never hit.
@@ -93,8 +94,15 @@ public final class Pty {
         thread.start()
     }
 
-    /// Writes all of `bytes`, retrying on partial writes.
+    /// Queues `bytes` for the child. Writes run on one serial queue, so a
+    /// child that stops reading blocks only that queue, never the caller
+    /// or the reader thread, and bytes keep their order.
     public func write(_ bytes: [UInt8]) {
+        guard !bytes.isEmpty, !hasExited else { return }
+        writeQueue.async { [self] in writeNow(bytes) }
+    }
+
+    private func writeNow(_ bytes: [UInt8]) {
         guard !hasExited else { return }
         bytes.withUnsafeBytes { raw in
             guard var p = raw.baseAddress else { return }

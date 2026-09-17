@@ -66,4 +66,15 @@ final class PtyTests: XCTestCase {
         pty.resize(cols: 5, rows: 5)
         XCTAssertTrue(pty.hasExited)
     }
+
+    func testLargeWriteReturnsBeforeTheChildReads() throws {
+        // sleep never reads stdin, so the pty's buffer fills and the write
+        // would block a caller that wrote inline.
+        let pty = try Pty(program: "/bin/sleep", arguments: ["sleep", "5"], environment: Pty.childEnvironment(), cols: 10, rows: 2)
+        pty.startReading(onData: { _ in }, onExit: {})
+        let start = Date()
+        pty.write([UInt8](repeating: 0x61, count: 4 * 1024 * 1024))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+        pty.close()
+    }
 }
