@@ -7,6 +7,7 @@ import QuartzCore
 public final class LatencyProbe {
     public static let enabled = ProcessInfo.processInfo.environment["TERM_PROBE"] != nil
     private var pendingKey: TimeInterval?
+    private var pendingCommit = false
     private var samples: [Double] = []
     private var commitSamples: [Double] = []
     private var reportedStartup = false
@@ -26,6 +27,7 @@ public final class LatencyProbe {
         guard LatencyProbe.enabled else { return }
         lock.lock()
         if pendingKey == nil { pendingKey = timestamp }
+        pendingCommit = true
         lock.unlock()
     }
 
@@ -33,7 +35,10 @@ public final class LatencyProbe {
     /// the terminal's own pipeline without the display's refresh wait.
     public func frameCommitted(at time: TimeInterval) {
         lock.lock()
-        if let key = pendingKey { commitSamples.append((time - key) * 1000) }
+        if pendingCommit, let key = pendingKey {
+            commitSamples.append((time - key) * 1000)
+            pendingCommit = false
+        }
         lock.unlock()
     }
 

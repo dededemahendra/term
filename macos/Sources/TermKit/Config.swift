@@ -67,8 +67,12 @@ public struct Config: Equatable {
 
     public static func parse(_ text: String, warn: (String) -> Void = { _ in }) -> Config {
         var config = Config()
-        for (index, rawLine) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-            let trimmedLine = rawLine.trimmingCharacters(in: .whitespaces)
+        // Swift treats "\r\n" as one extended grapheme cluster, distinct from a
+        // lone "\n", so splitting on "\n" alone never breaks a CRLF file into
+        // lines; normalise line endings first.
+        let normalised = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        for (index, rawLine) in normalised.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+            let trimmedLine = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedLine.isEmpty || trimmedLine.hasPrefix("#") { continue }
             guard let eq = trimmedLine.firstIndex(of: "=") else {
                 warn("config line \(index + 1): expected key = value")

@@ -29,6 +29,11 @@ public final class TerminalView: NSView, NSTextInputClient {
     private var probeTimer: Timer?
     private var probeKeysLeft = 0
 
+    deinit {
+        blinkTimer?.invalidate()
+        probeTimer?.invalidate()
+    }
+
     public init(session: TerminalSession, config: Config) {
         self.session = session
         self.config = config
@@ -94,27 +99,27 @@ public final class TerminalView: NSView, NSTextInputClient {
     public override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         rebuildAtlas()
-        updateGrid(force: true)
+        updateGrid()
     }
 
     public override func layout() {
         super.layout()
-        updateGrid(force: false)
+        updateGrid()
     }
 
-    private func updateGrid(force: Bool) {
+    private func updateGrid() {
         let size = bounds.size
         guard size.width > 0, size.height > 0 else { return }
         metalLayer.drawableSize = CGSize(width: size.width * scale, height: size.height * scale)
         let pad = CGFloat(config.padding)
         let newCols = max(1, Int((size.width - 2 * pad) * scale / CGFloat(atlas.cellWidth)))
         let newRows = max(1, Int((size.height - 2 * pad) * scale / CGFloat(atlas.cellHeight)))
-        if force || newCols != cols || newRows != rows {
+        if newCols != cols || newRows != rows {
             cols = newCols
             rows = newRows
             session.resize(cols: cols, rows: rows)
-            renderer.gridChanged(cols: cols, rows: rows)
         }
+        renderer.gridChanged(cols: cols, rows: rows)
         requestFrame()
     }
 
@@ -141,7 +146,7 @@ public final class TerminalView: NSView, NSTextInputClient {
         super.viewDidMoveToWindow()
         guard let window else { return }
         rebuildAtlas()
-        updateGrid(force: true)
+        updateGrid()
         NotificationCenter.default.addObserver(self, selector: #selector(becameKey), name: NSWindow.didBecomeKeyNotification, object: window)
         NotificationCenter.default.addObserver(self, selector: #selector(resignedKey), name: NSWindow.didResignKeyNotification, object: window)
         startProbeIfRequested()
@@ -335,7 +340,10 @@ public final class TerminalView: NSView, NSTextInputClient {
         var cells: [UInt64] = []
         terminal.copyGrid(into: &cells)
         let start = row * cols
-        let line = String(String.UnicodeScalarView(cells[start..<(start + cols)].map { Cell(raw: $0).scalar }))
+        let line = String(String.UnicodeScalarView(cells[start..<(start + cols)].map { raw -> Unicode.Scalar in
+            let cell = Cell(raw: raw)
+            return cell.flags.contains(.wideSpacer) ? " " : cell.scalar
+        }))
         if let url = UrlDetector.url(in: line, at: col), let parsed = URL(string: url) {
             NSWorkspace.shared.open(parsed)
         }
@@ -372,7 +380,7 @@ public final class TerminalView: NSView, NSTextInputClient {
     private func setFontSize(_ size: CGFloat) {
         fontSize = min(max(size, 4), 96)
         rebuildAtlas()
-        updateGrid(force: true)
+        updateGrid()
     }
 
     // MARK: Probe support

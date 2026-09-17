@@ -41,5 +41,5 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --sign - "$APP" 2>/dev/null
+codesign --force --sign - "$APP"
 echo "built $APP"

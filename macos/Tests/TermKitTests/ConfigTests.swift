@@ -83,4 +83,12 @@ final class ConfigTests: XCTestCase {
         XCTAssertNil(RGB(hex: "#12345"))
         XCTAssertNil(RGB(hex: "zzzzzz"))
     }
+
+    func testCrlfLineEndingsParse() {
+        var warnings: [String] = []
+        let config = Config.parse("font-size = 15\r\ncursor-style = bar\r\n", warn: { warnings.append($0) })
+        XCTAssertEqual(config.fontSize, 15)
+        XCTAssertEqual(config.cursorStyle, .bar)
+        XCTAssertEqual(warnings, [])
+    }
 }
