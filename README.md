@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="term" width="120" height="120">
+</p>
+
 # term
 
 A fast, lightweight terminal emulator. The goal is the lowest possible
