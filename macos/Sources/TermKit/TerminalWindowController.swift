@@ -1,4 +1,5 @@
 import AppKit
+import Metal
 
 /// One window, one shell.
 public final class TerminalWindowController: NSWindowController, NSWindowDelegate {
@@ -6,7 +7,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
     public let session: TerminalSession
     public let terminalView: TerminalView
 
-    public init(config: Config, command: [String]?) throws {
+    public init(config: Config, command: [String]?, device: MTLDevice) throws {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let m = GlyphAtlas.metrics(fontName: config.font, pointSize: CGFloat(config.fontSize), scale: scale,
                                    lineHeight: CGFloat(config.lineHeight))
@@ -14,7 +15,7 @@ public final class TerminalWindowController: NSWindowController, NSWindowDelegat
         let size = NSSize(width: CGFloat(80 * m.cellWidth) / scale + 2 * pad,
                           height: CGFloat(24 * m.cellHeight) / scale + 2 * pad)
         session = try TerminalSession(config: config, command: command, cols: 80, rows: 24)
-        terminalView = TerminalView(session: session, config: config)
+        terminalView = TerminalView(session: session, config: config, device: device)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
