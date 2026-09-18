@@ -1,6 +1,6 @@
 cask "term" do
   version "0.1.1"
-  sha256 "8222b49de14941c9a5b338e9f46139ce95a06d1330046175538adbfd2131fc21"
+  sha256 "83f2ee9c90d8f09783b4f3e778280b74394e969ad0753324401ea5de9e7776b3"
 
   url "https://github.com/dededemahendra/term/releases/download/v#{version}/Term-#{version}.dmg"
   name "Term"
