@@ -34,12 +34,12 @@ public final class TerminalView: NSView, NSTextInputClient {
         probeTimer?.invalidate()
     }
 
-    public init(session: TerminalSession, config: Config) {
+    public init(session: TerminalSession, config: Config, device: MTLDevice) {
         self.session = session
         self.config = config
         palette = Palette(config: config)
         fontSize = CGFloat(config.fontSize)
-        device = MTLCreateSystemDefaultDevice()!
+        self.device = device
         super.init(frame: .zero)
         wantsLayer = true
         metalLayer.device = device
