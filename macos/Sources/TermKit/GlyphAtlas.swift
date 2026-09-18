@@ -28,6 +28,8 @@ public struct GlyphRef: Equatable {
 /// Rasterises glyphs with CoreText into one RGBA texture, lazily.
 /// Monochrome glyphs are white with coverage in alpha; the shader tints
 /// them. Colour glyphs are stored as drawn.
+/// Not thread-safe: build and query it only from the main thread, the same
+/// thread the renderer draws on.
 public final class GlyphAtlas {
     private struct Key: Hashable {
         let codepoint: UInt32
