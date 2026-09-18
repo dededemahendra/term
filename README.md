@@ -100,4 +100,4 @@ runs and further start-up work are the planned next steps.
 
 ## Licence
 
-Not yet chosen. Until a licence is added, all rights are reserved.
+MIT. See [LICENSE](LICENSE).
