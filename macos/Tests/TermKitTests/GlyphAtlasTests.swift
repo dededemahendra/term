@@ -1,3 +1,4 @@
+import CoreText
 import Metal
 import XCTest
 @testable import TermKit
@@ -87,5 +88,18 @@ final class GlyphAtlasTests: XCTestCase {
         XCTAssertEqual(atlas.texture.width, 512)
         XCTAssertGreaterThan(blanks, 0)
         XCTAssertEqual(atlas.glyph(for: "M", style: [], wide: false).index, first.index, "cached glyphs still resolve")
+    }
+
+    func testNerdFontFallbackRendersIconGlyphsWithoutConfig() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let families = (CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? []
+        guard families.contains(where: { $0.range(of: "Nerd Font", options: .caseInsensitive) != nil }) else {
+            throw XCTSkip("no Nerd Font installed on this machine")
+        }
+        // Menlo lacks the powerline separator U+E0B0, and the system cascade has
+        // no font for private-use icons, so only the Nerd Font fallback resolves it.
+        let atlas = GlyphAtlas(device: device, fontName: "Menlo", pointSize: 13, scale: 2, lineHeight: 1)
+        let ref = atlas.glyph(for: Unicode.Scalar(0xE0B0)!, style: [], wide: false)
+        XCTAssertNotEqual(ref.index, 0, "index 0 is the blank sentinel; a non-zero index means the glyph rasterised")
     }
 }

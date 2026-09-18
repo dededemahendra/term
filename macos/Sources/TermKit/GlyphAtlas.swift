@@ -53,6 +53,8 @@ public final class GlyphAtlas {
     private let queue: MTLCommandQueue
     private let fonts: [GlyphStyle: CTFont]
     private var cache: [Key: GlyphRef] = [:]
+    private var symbolFallbackResolved = false
+    private var symbolFallback: CTFont?
     private var cursorX = 0
     private var cursorY = 0
 
@@ -138,6 +140,25 @@ public final class GlyphAtlas {
         return ref
     }
 
+    /// An installed Nerd Font used for glyphs the primary font and the system
+    /// cascade both lack, so powerline and Starship prompts render without any
+    /// config. Resolved once, lazily, on the first miss; nil when the machine
+    /// has no Nerd Font installed.
+    private func symbolFallbackFont() -> CTFont? {
+        if symbolFallbackResolved { return symbolFallback }
+        symbolFallbackResolved = true
+        let families = (CTFontManagerCopyAvailableFontFamilyNames() as? [String]) ?? []
+        let nerd = families.filter { $0.range(of: "Nerd Font", options: .caseInsensitive) != nil }
+        let name = nerd.first { $0.caseInsensitiveCompare("Symbols Nerd Font Mono") == .orderedSame }
+            ?? nerd.first { $0.caseInsensitiveCompare("Symbols Nerd Font") == .orderedSame }
+            ?? nerd.first { $0.range(of: "Mono", options: .caseInsensitive) != nil }
+            ?? nerd.first
+        if let name {
+            symbolFallback = CTFontCreateWithName(name as CFString, pointSize * scale, nil)
+        }
+        return symbolFallback
+    }
+
     private func lookup(_ scalar: Unicode.Scalar, style: GlyphStyle) -> (CGGlyph, CTFont)? {
         let font = fonts[style] ?? fonts[[]]!
         var units = Array(String(scalar).utf16)
@@ -148,6 +169,10 @@ public final class GlyphAtlas {
         let fallback = CTFontCreateForString(font, String(scalar) as CFString, CFRange(location: 0, length: units.count))
         if CTFontGetGlyphsForCharacters(fallback, &units, &glyphs, units.count), glyphs[0] != 0 {
             return (glyphs[0], fallback)
+        }
+        if let fb = symbolFallbackFont(),
+           CTFontGetGlyphsForCharacters(fb, &units, &glyphs, units.count), glyphs[0] != 0 {
+            return (glyphs[0], fb)
         }
         return nil
     }
