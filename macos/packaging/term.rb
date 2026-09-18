@@ -7,7 +7,7 @@ cask "term" do
   desc "Light and fast terminal emulator"
   homepage "https://github.com/dededemahendra/term"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "Term.app"
 
