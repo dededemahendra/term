@@ -10,9 +10,16 @@ public final class DeviceProvider {
     private var resolved = false
     private var device: MTLDevice?
 
-    public init() {
+    public convenience init() {
+        self.init(factory: { MTLCreateSystemDefaultDevice() })
+    }
+
+    /// Runs `factory` on a background thread to produce the device. The
+    /// default initialiser uses the system device; tests inject a factory
+    /// to exercise the wait path deterministically.
+    init(factory: @escaping () -> MTLDevice?) {
         DispatchQueue.global(qos: .userInteractive).async { [self] in
-            let created = MTLCreateSystemDefaultDevice()
+            let created = factory()
             condition.lock()
             device = created
             resolved = true
